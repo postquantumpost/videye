@@ -31,16 +31,29 @@ pub(crate) struct ProcessingState {
     pub(crate) frame_rate_den: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TextAct {
+    timestamp_ns: u128,
+    actnumber: String,
+    acttitle: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HistoryEntry {
+    TextAct(TextAct),
+}
+
+pub(crate) type History = Vec<HistoryEntry>;
+
 pub(crate) fn process_frame(
     state: &mut ProcessingState,
     frame: &[u8],
     output_file: &mut File,
     video_output: &mut impl Write,
+    history: &mut History,
 ) -> io::Result<()> {
     state.current_frame += 1;
-    let elapsed_ns =
-        u128::from(state.current_frame - 1) * u128::from(state.frame_rate_den) * 1_000_000_000
-            / u128::from(state.frame_rate_num);
+    let elapsed_ns = frame_timestamp_ns(state);
     let elapsed_seconds = elapsed_ns / 1_000_000_000;
     let hours = elapsed_seconds / 3_600;
     let minutes = (elapsed_seconds / 60) % 60;
@@ -71,12 +84,14 @@ pub(crate) fn process_frame(
         )?;
     }
     for pair in symbols.windows(2) {
+        let mut actnumber = None;
+        let mut acttitle = None;
         if let Some(crop) =
             text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
         {
             let text = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
             if !text.trim().is_empty() {
-                writeln!(output_file, "Text between symbols: {}", text.trim())?;
+                actnumber = Some(text.trim().to_string());
             }
         }
         if let Some(crop) =
@@ -84,11 +99,59 @@ pub(crate) fn process_frame(
         {
             let title = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
             if !title.trim().is_empty() {
-                writeln!(output_file, "Title below symbols: {}", title.trim())?;
+                acttitle = Some(title.trim().to_string());
             }
+        }
+        if let (Some(actnumber), Some(acttitle)) = (actnumber, acttitle) {
+            add_textact(history, elapsed_ns, actnumber, acttitle);
         }
     }
     video_output.write_all(&annotated_frame)
+}
+
+fn frame_timestamp_ns(state: &ProcessingState) -> u128 {
+    u128::from(state.current_frame - 1) * u128::from(state.frame_rate_den) * 1_000_000_000
+        / u128::from(state.frame_rate_num)
+}
+
+fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, acttitle: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::TextAct(textact) => {
+            textact.actnumber == actnumber
+                && textact.acttitle == acttitle
+                && timestamp_ns.saturating_sub(textact.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::TextAct(TextAct {
+            timestamp_ns,
+            actnumber,
+            acttitle,
+        }));
+    }
+}
+
+pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Result<()> {
+    for entry in history {
+        match entry {
+            HistoryEntry::TextAct(textact) => {
+                let elapsed_seconds = textact.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = textact.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "TextAct at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Text between symbols: {}", textact.actnumber)?;
+                writeln!(output_file, "Title below symbols: {}", textact.acttitle)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn text_crop_between_symbols(
@@ -587,7 +650,49 @@ fn crop_rgba_to_rgb(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_diamond_symbols, BoundingBox, Component, ProcessingState};
+    use super::{
+        add_textact, find_diamond_symbols, BoundingBox, Component, HistoryEntry, ProcessingState,
+    };
+
+    #[test]
+    fn deduplicates_matching_textacts_within_twenty_seconds() {
+        let mut history = Vec::new();
+        add_textact(
+            &mut history,
+            5_000_000_000,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+        add_textact(
+            &mut history,
+            10_000_000_000,
+            "B34".to_string(),
+            "Different".to_string(),
+        );
+        add_textact(
+            &mut history,
+            25_000_000_000,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+        add_textact(
+            &mut history,
+            25_000_000_001,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+
+        let timestamps: Vec<u128> = history
+            .iter()
+            .map(|entry| match entry {
+                HistoryEntry::TextAct(textact) => textact.timestamp_ns,
+            })
+            .collect();
+        assert_eq!(
+            timestamps,
+            vec![5_000_000_000, 10_000_000_000, 25_000_000_001]
+        );
+    }
 
     #[test]
     fn finds_four_diamond_symbols_on_centerline() {

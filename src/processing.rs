@@ -1,4 +1,4 @@
-use crate::frame_processor::{process_frame, ProcessingState};
+use crate::frame_processor::{process_frame, write_history, History, ProcessingState};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
@@ -56,6 +56,7 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
         frame_rate_num,
         frame_rate_den,
     };
+    let mut history = History::new();
     let mut frame = vec![0; state.frame_size];
 
     loop {
@@ -73,8 +74,14 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
             break;
         }
 
-        process_frame(&mut state, &frame, &mut output_file, &mut video_frames)
-            .map_err(|error| format!("failed to process video frame: {error}"))?;
+        process_frame(
+            &mut state,
+            &frame,
+            &mut output_file,
+            &mut video_frames,
+            &mut history,
+        )
+        .map_err(|error| format!("failed to process video frame: {error}"))?;
     }
 
     let status = decoder
@@ -93,6 +100,9 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
             "GStreamer video encoder exited with status {status}"
         ));
     }
+
+    write_history(&history, &mut output_file)
+        .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
 
     Ok(())
 }
