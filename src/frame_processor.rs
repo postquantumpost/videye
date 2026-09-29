@@ -62,15 +62,114 @@ pub(crate) fn process_frame(
 
     let symbols = find_diamond_symbols(state, frame);
     let mut annotated_frame = frame.to_vec();
-    for symbol in symbols {
-        draw_bounding_box(&mut annotated_frame, state.frame_width, &symbol);
+    for symbol in &symbols {
+        draw_bounding_box(&mut annotated_frame, state.frame_width, symbol);
         writeln!(
             output_file,
             "Diamond symbol: x={} y={} width={} height={}",
             symbol.left, symbol.top, symbol.width, symbol.height
         )?;
     }
+    for pair in symbols.windows(2) {
+        if let Some(crop) =
+            text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
+        {
+            let text = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            if !text.trim().is_empty() {
+                writeln!(output_file, "Text between symbols: {}", text.trim())?;
+            }
+        }
+        if let Some(crop) =
+            title_crop_below_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
+        {
+            let title = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            if !title.trim().is_empty() {
+                writeln!(output_file, "Title below symbols: {}", title.trim())?;
+            }
+        }
+    }
     video_output.write_all(&annotated_frame)
+}
+
+fn text_crop_between_symbols(
+    left: &BoundingBox,
+    right: &BoundingBox,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<BoundingBox> {
+    let (left_center_y, right_center_y) = aligned_symbol_centers(left, right)?;
+
+    let gap_left = left.left.checked_add(left.width)?;
+    if gap_left >= right.left || right.left > frame_width {
+        return None;
+    }
+
+    let crop_height = left.height.saturating_add(right.height).min(frame_height);
+    if crop_height == 0 {
+        return None;
+    }
+    let center_y = (left_center_y + right_center_y) / 2;
+    let crop_top = center_y
+        .saturating_sub(crop_height / 2)
+        .min(frame_height - crop_height);
+
+    Some(BoundingBox {
+        left: gap_left,
+        top: crop_top,
+        width: right.left - gap_left,
+        height: crop_height,
+    })
+}
+
+fn title_crop_below_symbols(
+    left: &BoundingBox,
+    right: &BoundingBox,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<BoundingBox> {
+    if frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+    let (left_center_y, right_center_y) = aligned_symbol_centers(left, right)?;
+    let symbol_height = left.height.checked_add(right.height)? / 2;
+    if symbol_height == 0 {
+        return None;
+    }
+
+    let crop_height = symbol_height.checked_mul(2)?.min(frame_height);
+    let center_y = left_center_y.checked_add(right_center_y)? / 2;
+    let crop_offset = symbol_height.checked_add(symbol_height / 2)?;
+    let crop_top = center_y
+        .saturating_add(crop_offset)
+        .min(frame_height - crop_height);
+
+    Some(BoundingBox {
+        left: 0,
+        top: crop_top,
+        width: frame_width,
+        height: crop_height,
+    })
+}
+
+fn aligned_symbol_centers(left: &BoundingBox, right: &BoundingBox) -> Option<(usize, usize)> {
+    if !similar_symbol_sizes(left, right) {
+        return None;
+    }
+
+    let left_center_y = left.top.checked_add(left.height / 2)?;
+    let right_center_y = right.top.checked_add(right.height / 2)?;
+    let vertical_tolerance = (left.height.max(right.height) / 2).max(2);
+    (left_center_y.abs_diff(right_center_y) <= vertical_tolerance)
+        .then_some((left_center_y, right_center_y))
+}
+
+fn similar_symbol_sizes(left: &BoundingBox, right: &BoundingBox) -> bool {
+    let width_min = left.width.min(right.width);
+    let height_min = left.height.min(right.height);
+    width_min > 0
+        && height_min > 0
+        && left.width.max(right.width) as f32 / width_min as f32 <= 1.25
+        && left.height.max(right.height) as f32 / height_min as f32 <= 1.25
 }
 
 fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBox> {
@@ -405,9 +504,15 @@ fn is_aspect_ratio_within(width: usize, height: usize, max_ratio: f32) -> bool {
     shorter_side > 0 && width.max(height) as f32 / shorter_side as f32 <= max_ratio
 }
 
-fn recognize_text(state: &ProcessingState, frame: &[u8]) -> io::Result<String> {
+fn recognize_text(
+    frame: &[u8],
+    frame_width: usize,
+    frame_height: usize,
+    crop: &BoundingBox,
+) -> io::Result<String> {
+    let rgb_crop = crop_rgba_to_rgb(frame, frame_width, frame_height, crop)?;
     let mut tesseract = Command::new("tesseract")
-        .args(["stdin", "stdout"])
+        .args(["stdin", "stdout", "--psm", "7"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -416,12 +521,8 @@ fn recognize_text(state: &ProcessingState, frame: &[u8]) -> io::Result<String> {
     let mut stdin = tesseract.stdin.take().ok_or_else(|| {
         io::Error::new(io::ErrorKind::BrokenPipe, "failed to open Tesseract stdin")
     })?;
-    write!(
-        stdin,
-        "P6\n{} {}\n255\n",
-        state.frame_width, state.frame_height
-    )?;
-    stdin.write_all(frame)?;
+    write!(stdin, "P6\n{} {}\n255\n", crop.width, crop.height)?;
+    stdin.write_all(&rgb_crop)?;
     drop(stdin);
 
     let output = tesseract.wait_with_output()?;
@@ -437,6 +538,51 @@ fn recognize_text(state: &ProcessingState, frame: &[u8]) -> io::Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn crop_rgba_to_rgb(
+    frame: &[u8],
+    frame_width: usize,
+    frame_height: usize,
+    crop: &BoundingBox,
+) -> io::Result<Vec<u8>> {
+    let frame_len = frame_width
+        .checked_mul(frame_height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame dimensions overflow"))?;
+    let crop_right = crop
+        .left
+        .checked_add(crop.width)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "crop dimensions overflow"))?;
+    let crop_bottom = crop
+        .top
+        .checked_add(crop.height)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "crop dimensions overflow"))?;
+    if crop.width == 0
+        || crop.height == 0
+        || frame.len() < frame_len
+        || crop_right > frame_width
+        || crop_bottom > frame_height
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "OCR crop is outside the RGBA frame",
+        ));
+    }
+
+    let rgb_len = crop
+        .width
+        .checked_mul(crop.height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "crop dimensions overflow"))?;
+    let mut rgb = Vec::with_capacity(rgb_len);
+    for y in crop.top..crop_bottom {
+        for x in crop.left..crop_right {
+            let pixel = (y * frame_width + x) * 4;
+            rgb.extend_from_slice(&frame[pixel..pixel + 3]);
+        }
+    }
+    Ok(rgb)
 }
 
 #[cfg(test)]
@@ -596,6 +742,99 @@ mod tests {
             20,
         )
         .is_none());
+    }
+
+    #[test]
+    fn crops_full_gap_with_text_height_scaled_from_symbols() {
+        let left = BoundingBox {
+            left: 100,
+            top: 50,
+            width: 20,
+            height: 20,
+        };
+        let right = BoundingBox {
+            left: 200,
+            top: 52,
+            width: 20,
+            height: 20,
+        };
+
+        assert_eq!(
+            super::text_crop_between_symbols(&left, &right, 300, 120),
+            Some(BoundingBox {
+                left: 120,
+                top: 41,
+                width: 80,
+                height: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn title_crop_uses_full_frame_width_below_symbol_pair() {
+        let left = BoundingBox {
+            left: 100,
+            top: 50,
+            width: 20,
+            height: 20,
+        };
+        let right = BoundingBox {
+            left: 200,
+            top: 52,
+            width: 20,
+            height: 20,
+        };
+
+        assert_eq!(
+            super::title_crop_below_symbols(&left, &right, 300, 160),
+            Some(BoundingBox {
+                left: 0,
+                top: 91,
+                width: 300,
+                height: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_symbol_pairs_with_different_size_or_vertical_position() {
+        let left = BoundingBox {
+            left: 100,
+            top: 50,
+            width: 20,
+            height: 20,
+        };
+        let different_size = BoundingBox {
+            left: 200,
+            top: 50,
+            width: 30,
+            height: 20,
+        };
+        let different_height = BoundingBox {
+            left: 200,
+            top: 80,
+            width: 20,
+            height: 20,
+        };
+
+        assert!(super::text_crop_between_symbols(&left, &different_size, 300, 120).is_none());
+        assert!(super::text_crop_between_symbols(&left, &different_height, 300, 120).is_none());
+    }
+
+    #[test]
+    fn converts_rgba_crop_to_rgb_for_tesseract() {
+        let frame: Vec<u8> = (0..24).collect();
+        let crop = BoundingBox {
+            left: 1,
+            top: 0,
+            width: 2,
+            height: 2,
+        };
+
+        assert_eq!(
+            super::crop_rgba_to_rgb(&frame, 3, 2, &crop).unwrap(),
+            vec![4, 5, 6, 8, 9, 10, 16, 17, 18, 20, 21, 22]
+        );
     }
 
     fn diamond_component(center_x: usize, center_y: usize, radius: usize) -> Component {
