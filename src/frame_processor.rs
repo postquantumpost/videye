@@ -19,6 +19,17 @@ struct Component {
     pixels: Option<Vec<(usize, usize)>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Location1Side {
+    Left,
+    Right,
+}
+
+struct Location1Symbol {
+    bounds: BoundingBox,
+    side: Location1Side,
+}
+
 const MAX_GROUP_ASPECT_RATIO: f32 = 1.2;
 const MAX_COMPONENT_ASPECT_RATIO: f32 = 1.5;
 
@@ -39,8 +50,22 @@ pub(crate) struct TextAct {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Location2 {
+    timestamp_ns: u128,
+    location2: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Location1 {
+    timestamp_ns: u128,
+    location1: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HistoryEntry {
     TextAct(TextAct),
+    Location1(Location1),
+    Location2(Location2),
 }
 
 pub(crate) type History = Vec<HistoryEntry>;
@@ -106,6 +131,54 @@ pub(crate) fn process_frame(
             add_textact(history, elapsed_ns, actnumber, acttitle);
         }
     }
+
+    let location_symbols = find_location_symbols(state, frame);
+    for symbol in &location_symbols {
+        draw_bounding_box(&mut annotated_frame, state.frame_width, symbol);
+        writeln!(
+            output_file,
+            "Location2 symbol: x={} y={} width={} height={}",
+            symbol.left, symbol.top, symbol.width, symbol.height
+        )?;
+    }
+    for pair in location_symbols.windows(2) {
+        if let Some(crop) =
+            text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
+        {
+            let location2 = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let location2 = location2.trim();
+            if !location2.is_empty() {
+                add_location2(history, elapsed_ns, location2.to_string());
+            }
+        }
+    }
+
+    let location1_symbols = find_location1_symbols(state, frame);
+    for symbol in &location1_symbols {
+        draw_bounding_box(&mut annotated_frame, state.frame_width, &symbol.bounds);
+        writeln!(
+            output_file,
+            "Location1 symbol: x={} y={} width={} height={}",
+            symbol.bounds.left, symbol.bounds.top, symbol.bounds.width, symbol.bounds.height
+        )?;
+    }
+    for pair in location1_symbols.windows(2) {
+        if pair[0].side != Location1Side::Left || pair[1].side != Location1Side::Right {
+            continue;
+        }
+        if let Some(crop) = text_crop_between_symbols(
+            &pair[0].bounds,
+            &pair[1].bounds,
+            state.frame_width,
+            state.frame_height,
+        ) {
+            let location1 = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let location1 = location1.trim();
+            if !location1.is_empty() {
+                add_location1(history, elapsed_ns, location1.to_string());
+            }
+        }
+    }
     video_output.write_all(&annotated_frame)
 }
 
@@ -123,12 +196,51 @@ fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, act
                 && textact.acttitle == acttitle
                 && timestamp_ns.saturating_sub(textact.timestamp_ns) <= DUPLICATE_WINDOW_NS
         }
+        HistoryEntry::Location2(_) => false,
+        HistoryEntry::Location1(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::TextAct(TextAct {
             timestamp_ns,
             actnumber,
             acttitle,
+        }));
+    }
+}
+
+fn add_location2(history: &mut History, timestamp_ns: u128, location2: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::TextAct(_) => false,
+        HistoryEntry::Location1(_) => false,
+        HistoryEntry::Location2(previous) => {
+            previous.location2 == location2
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Location2(Location2 {
+            timestamp_ns,
+            location2,
+        }));
+    }
+}
+
+fn add_location1(history: &mut History, timestamp_ns: u128, location1: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::Location1(previous) => {
+            previous.location1 == location1
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+        HistoryEntry::TextAct(_) | HistoryEntry::Location2(_) => false,
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Location1(Location1 {
+            timestamp_ns,
+            location1,
         }));
     }
 }
@@ -148,6 +260,30 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 )?;
                 writeln!(output_file, "Text between symbols: {}", textact.actnumber)?;
                 writeln!(output_file, "Title below symbols: {}", textact.acttitle)?;
+            }
+            HistoryEntry::Location2(location2) => {
+                let elapsed_seconds = location2.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = location2.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Location2 at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Location2: {}", location2.location2)?;
+            }
+            HistoryEntry::Location1(location1) => {
+                let elapsed_seconds = location1.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = location1.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Location1 at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Location1: {}", location1.location1)?;
             }
         }
     }
@@ -170,6 +306,28 @@ pub(crate) fn write_history_single_line(
                     output_file,
                     "{hours}:{minutes}:{seconds} act: {}, {}",
                     textact.actnumber, textact.acttitle
+                )?;
+            }
+            HistoryEntry::Location2(location2) => {
+                let elapsed_seconds = location2.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                writeln!(
+                    output_file,
+                    "{hours}:{minutes}:{seconds} location2: {}",
+                    location2.location2
+                )?;
+            }
+            HistoryEntry::Location1(location1) => {
+                let elapsed_seconds = location1.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                writeln!(
+                    output_file,
+                    "{hours}:{minutes}:{seconds} location1: {}",
+                    location1.location1
                 )?;
             }
         }
@@ -259,6 +417,15 @@ fn similar_symbol_sizes(left: &BoundingBox, right: &BoundingBox) -> bool {
 }
 
 fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBox> {
+    find_diamond_symbols_in_band(state, frame, state.frame_height / 2, is_dark_pixel)
+}
+
+fn find_location_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBox> {
+    let center_y = state.frame_height.saturating_mul(24) / 100;
+    find_diamond_symbols_in_band(state, frame, center_y, is_bright_pixel)
+}
+
+fn find_location1_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<Location1Symbol> {
     let width = state.frame_width;
     let height = state.frame_height;
     let Some(expected_len) = width
@@ -271,7 +438,7 @@ fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBo
         return Vec::new();
     }
 
-    let center_y = height / 2;
+    let center_y = height.saturating_mul(24) / 100;
     let max_group_dimension = ((height as f32 * 0.06).ceil() as usize).max(12);
     let band_radius = max_group_dimension;
     let first_y = center_y.saturating_sub(band_radius);
@@ -287,7 +454,7 @@ fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBo
     for y in first_y..=last_y {
         for x in 0..width {
             let band_index = (y - first_y) * width + x;
-            if visited[band_index] || !is_dark_pixel(frame, width, x, y) {
+            if visited[band_index] || !is_location1_pixel(frame, width, x, y) {
                 continue;
             }
 
@@ -299,6 +466,210 @@ fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBo
                 x,
                 y,
                 max_component_dimension.saturating_mul(max_component_dimension),
+                is_location1_pixel,
+                &mut visited,
+            );
+            let component_width = component.max_x - component.min_x + 1;
+            let component_height = component.max_y - component.min_y + 1;
+            if component.area >= 3
+                && component_width >= 2
+                && component_height >= 2
+                && component_width <= max_component_dimension
+                && component_height <= max_component_dimension
+                && is_roughly_diamond_shaped(&component)
+            {
+                components.push(component);
+            }
+        }
+    }
+
+    components.sort_by_key(|component| component.min_x);
+    let center_tolerance = ((height as f32 * 0.012).ceil() as usize).max(2);
+    let mut symbols = Vec::new();
+    for first in 0..components.len() {
+        for second in first + 1..components.len() {
+            if components[second].min_x - components[first].min_x > max_group_dimension {
+                break;
+            }
+            for third in second + 1..components.len() {
+                if components[third].min_x - components[first].min_x > max_group_dimension {
+                    break;
+                }
+                let group = [&components[first], &components[second], &components[third]];
+                if let Some(symbol) =
+                    location1_symbol_bounds(group, center_y, center_tolerance, max_group_dimension)
+                {
+                    if !symbols.iter().any(|existing: &Location1Symbol| {
+                        existing.bounds == symbol.bounds && existing.side == symbol.side
+                    }) {
+                        symbols.push(symbol);
+                    }
+                }
+            }
+        }
+    }
+
+    symbols.sort_by_key(|symbol| symbol.bounds.left);
+    symbols
+}
+
+fn is_location1_pixel(frame: &[u8], width: usize, x: usize, y: usize) -> bool {
+    let pixel = (y * width + x) * 4;
+    let red = frame[pixel];
+    let green = frame[pixel + 1];
+    let blue = frame[pixel + 2];
+    red >= 100 && green >= 80 && red >= green && green >= blue && red.saturating_sub(blue) >= 12
+}
+
+fn location1_symbol_bounds(
+    group: [&Component; 3],
+    center_y: usize,
+    center_tolerance: usize,
+    max_group_dimension: usize,
+) -> Option<Location1Symbol> {
+    if !group
+        .iter()
+        .all(|component| is_roughly_diamond_shaped(component))
+        || !have_similar_sizes(&group)
+    {
+        return None;
+    }
+
+    let mut centers: Vec<(usize, usize)> = group
+        .iter()
+        .map(|component| {
+            (
+                (component.min_x + component.max_x) / 2,
+                (component.min_y + component.max_y) / 2,
+            )
+        })
+        .collect();
+    centers.sort_by_key(|center| center.1);
+    let (top_x, top_y) = centers[0];
+    let (middle_x, middle_y) = centers[1];
+    let (bottom_x, bottom_y) = centers[2];
+    let top_gap = middle_y.checked_sub(top_y)?;
+    let bottom_gap = bottom_y.checked_sub(middle_y)?;
+    if top_gap == 0 || bottom_gap == 0 || top_gap.abs_diff(bottom_gap) > center_tolerance {
+        return None;
+    }
+
+    let aligned_x = (top_x + bottom_x) / 2;
+    let max_component_width = group
+        .iter()
+        .map(|component| component.max_x - component.min_x + 1)
+        .max()?;
+    if top_x.abs_diff(bottom_x) > max_component_width
+        || middle_y.abs_diff((top_y + bottom_y) / 2) > center_tolerance
+        || middle_x.abs_diff(aligned_x) <= max_component_width / 2
+    {
+        return None;
+    }
+
+    let min_x = group.iter().map(|component| component.min_x).min()?;
+    let min_y = group.iter().map(|component| component.min_y).min()?;
+    let max_x = group.iter().map(|component| component.max_x).max()?;
+    let max_y = group.iter().map(|component| component.max_y).max()?;
+    let bounds_width = max_x - min_x + 1;
+    let bounds_height = max_y - min_y + 1;
+    if bounds_width >= bounds_height
+        || bounds_height > max_group_dimension
+        || bounds_width > max_group_dimension
+        || bounds_height as f32 / bounds_width as f32 > 3.0
+        || ((top_y + bottom_y) / 2).abs_diff(center_y) > center_tolerance
+    {
+        return None;
+    }
+
+    Some(Location1Symbol {
+        bounds: BoundingBox {
+            left: min_x,
+            top: min_y,
+            width: bounds_width,
+            height: bounds_height,
+        },
+        side: if middle_x < aligned_x {
+            Location1Side::Left
+        } else {
+            Location1Side::Right
+        },
+    })
+}
+
+fn have_similar_sizes(group: &[&Component]) -> bool {
+    let min_width = group
+        .iter()
+        .map(|component| component.max_x - component.min_x + 1)
+        .min()
+        .unwrap_or(0);
+    let max_width = group
+        .iter()
+        .map(|component| component.max_x - component.min_x + 1)
+        .max()
+        .unwrap_or(0);
+    let min_height = group
+        .iter()
+        .map(|component| component.max_y - component.min_y + 1)
+        .min()
+        .unwrap_or(0);
+    let max_height = group
+        .iter()
+        .map(|component| component.max_y - component.min_y + 1)
+        .max()
+        .unwrap_or(0);
+
+    min_width > 0
+        && min_height > 0
+        && max_width as f32 / min_width as f32 <= 1.5
+        && max_height as f32 / min_height as f32 <= 1.5
+}
+
+fn find_diamond_symbols_in_band(
+    state: &ProcessingState,
+    frame: &[u8],
+    center_y: usize,
+    is_target_pixel: fn(&[u8], usize, usize, usize) -> bool,
+) -> Vec<BoundingBox> {
+    let width = state.frame_width;
+    let height = state.frame_height;
+    let Some(expected_len) = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return Vec::new();
+    };
+    if width == 0 || height == 0 || frame.len() < expected_len {
+        return Vec::new();
+    }
+
+    let max_group_dimension = ((height as f32 * 0.06).ceil() as usize).max(12);
+    let band_radius = max_group_dimension;
+    let first_y = center_y.saturating_sub(band_radius);
+    let last_y = center_y.saturating_add(band_radius).min(height - 1);
+    let band_height = last_y - first_y + 1;
+    let Some(band_size) = width.checked_mul(band_height) else {
+        return Vec::new();
+    };
+    let mut visited = vec![false; band_size];
+    let max_component_dimension = ((height as f32 * 0.025).ceil() as usize).max(5);
+    let mut components = Vec::new();
+
+    for y in first_y..=last_y {
+        for x in 0..width {
+            let band_index = (y - first_y) * width + x;
+            if visited[band_index] || !is_target_pixel(frame, width, x, y) {
+                continue;
+            }
+
+            let component = collect_component(
+                frame,
+                width,
+                first_y,
+                last_y,
+                x,
+                y,
+                max_component_dimension.saturating_mul(max_component_dimension),
+                is_target_pixel,
                 &mut visited,
             );
             let component_width = component.max_x - component.min_x + 1;
@@ -363,6 +734,17 @@ fn is_dark_pixel(frame: &[u8], width: usize, x: usize, y: usize) -> bool {
     (299 * red + 587 * green + 114 * blue) / 1000 < 128
 }
 
+fn is_bright_pixel(frame: &[u8], width: usize, x: usize, y: usize) -> bool {
+    let pixel = (y * width + x) * 4;
+    let red = frame[pixel];
+    let green = frame[pixel + 1];
+    let blue = frame[pixel + 2];
+    red >= 180
+        && green >= 180
+        && blue >= 180
+        && red.max(green).max(blue) - red.min(green).min(blue) <= 45
+}
+
 fn draw_bounding_box(frame: &mut [u8], frame_width: usize, bounds: &BoundingBox) {
     let right = bounds.left + bounds.width;
     let bottom = bounds.top + bounds.height;
@@ -391,6 +773,7 @@ fn collect_component(
     start_x: usize,
     start_y: usize,
     max_stored_pixels: usize,
+    is_target_pixel: fn(&[u8], usize, usize, usize) -> bool,
     visited: &mut [bool],
 ) -> Component {
     let mut pending = vec![(start_x, start_y)];
@@ -429,7 +812,7 @@ fn collect_component(
         ];
         for (neighbor_x, neighbor_y) in neighbors.into_iter().flatten() {
             let neighbor_index = (neighbor_y - first_y) * width + neighbor_x;
-            if !visited[neighbor_index] && is_dark_pixel(frame, width, neighbor_x, neighbor_y) {
+            if !visited[neighbor_index] && is_target_pixel(frame, width, neighbor_x, neighbor_y) {
                 visited[neighbor_index] = true;
                 pending.push((neighbor_x, neighbor_y));
             }
@@ -674,8 +1057,9 @@ fn crop_rgba_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_textact, find_diamond_symbols, write_history_single_line, BoundingBox, Component,
-        HistoryEntry, ProcessingState,
+        add_location1, add_location2, add_textact, find_diamond_symbols, find_location1_symbols,
+        find_location_symbols, write_history_single_line, BoundingBox, Component, HistoryEntry,
+        Location1Side, ProcessingState,
     };
 
     #[test]
@@ -692,6 +1076,32 @@ mod tests {
         write_history_single_line(&history, &mut output).unwrap();
 
         assert_eq!(output, b"1:1:1 act: A12, Opening\n");
+    }
+
+    #[test]
+    fn writes_location2_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_location2(
+            &mut history,
+            2_000_000_000,
+            "Loyal Friend's Grave".to_string(),
+        );
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"0:0:2 location2: Loyal Friend's Grave\n");
+    }
+
+    #[test]
+    fn writes_location1_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_location1(&mut history, 2_000_000_000, "Kin Prefecture".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"0:0:2 location1: Kin Prefecture\n");
     }
 
     #[test]
@@ -726,6 +1136,8 @@ mod tests {
             .iter()
             .map(|entry| match entry {
                 HistoryEntry::TextAct(textact) => textact.timestamp_ns,
+                HistoryEntry::Location1(_) => panic!("unexpected Location1 entry"),
+                HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
             })
             .collect();
         assert_eq!(
@@ -767,6 +1179,124 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn finds_white_symbols_in_upper_location_band() {
+        let width = 480;
+        let height = 300;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        draw_white_symbol(&mut frame, width, 120, height * 24 / 100);
+        draw_white_symbol(&mut frame, width, 360, height * 24 / 100);
+        let state = ProcessingState {
+            current_frame: 0,
+            frame_width: width,
+            frame_height: height,
+            frame_size: frame.len(),
+            frame_rate_num: 1,
+            frame_rate_den: 1,
+        };
+
+        assert_eq!(
+            find_location_symbols(&state, &frame),
+            vec![
+                BoundingBox {
+                    left: 114,
+                    top: 66,
+                    width: 13,
+                    height: 13,
+                },
+                BoundingBox {
+                    left: 354,
+                    top: 66,
+                    width: 13,
+                    height: 13,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_mirrored_tall_gold_three_diamond_location_symbols() {
+        let width = 480;
+        let height = 300;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        let center_y = height * 24 / 100;
+        draw_location1_symbol(&mut frame, width, 100, center_y, false);
+        draw_location1_symbol(&mut frame, width, 380, center_y, true);
+        let state = ProcessingState {
+            current_frame: 0,
+            frame_width: width,
+            frame_height: height,
+            frame_size: frame.len(),
+            frame_rate_num: 1,
+            frame_rate_den: 1,
+        };
+
+        let symbols = find_location1_symbols(&state, &frame);
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].side, Location1Side::Left);
+        assert_eq!(symbols[1].side, Location1Side::Right);
+        assert!(symbols
+            .iter()
+            .all(|symbol| symbol.bounds.height > symbol.bounds.width));
+    }
+
+    #[test]
+    fn deduplicates_matching_location2_entries_within_twenty_seconds() {
+        let mut history = Vec::new();
+        add_location2(
+            &mut history,
+            1_000_000_000,
+            "Loyal Friend's Grave".to_string(),
+        );
+        add_location2(
+            &mut history,
+            20_000_000_000,
+            "Loyal Friend's Grave".to_string(),
+        );
+        add_location2(
+            &mut history,
+            21_000_000_001,
+            "Loyal Friend's Grave".to_string(),
+        );
+
+        let locations: Vec<&str> = history
+            .iter()
+            .map(|entry| match entry {
+                HistoryEntry::TextAct(_) => panic!("unexpected TextAct entry"),
+                HistoryEntry::Location1(_) => panic!("unexpected Location1 entry"),
+                HistoryEntry::Location2(location) => location.location2.as_str(),
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            vec!["Loyal Friend's Grave", "Loyal Friend's Grave"]
+        );
+    }
+
+    #[test]
+    fn deduplicates_matching_location1_entries_within_twenty_seconds() {
+        let mut history = Vec::new();
+        add_location1(&mut history, 1_000_000_000, "Kin Prefecture".to_string());
+        add_location1(&mut history, 20_000_000_000, "Kin Prefecture".to_string());
+        add_location1(&mut history, 21_000_000_001, "Kin Prefecture".to_string());
+
+        let locations: Vec<&str> = history
+            .iter()
+            .map(|entry| match entry {
+                HistoryEntry::TextAct(_) => panic!("unexpected TextAct entry"),
+                HistoryEntry::Location1(location) => location.location1.as_str(),
+                HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
+            })
+            .collect();
+        assert_eq!(locations, vec!["Kin Prefecture", "Kin Prefecture"]);
     }
 
     #[test]
@@ -1016,6 +1546,50 @@ mod tests {
     }
 
     fn draw_symbol(frame: &mut [u8], width: usize, center_x: usize, center_y: usize) {
+        draw_symbol_with_color(frame, width, center_x, center_y, [0, 0, 0, 255]);
+    }
+
+    fn draw_white_symbol(frame: &mut [u8], width: usize, center_x: usize, center_y: usize) {
+        draw_symbol_with_color(frame, width, center_x, center_y, [255, 255, 255, 255]);
+    }
+
+    fn draw_location1_symbol(
+        frame: &mut [u8],
+        width: usize,
+        center_x: usize,
+        center_y: usize,
+        side_right: bool,
+    ) {
+        let side_x = if side_right {
+            center_x + 6
+        } else {
+            center_x - 6
+        };
+        for (diamond_x, diamond_y) in [
+            (center_x, center_y - 6),
+            (center_x, center_y + 6),
+            (side_x, center_y),
+        ] {
+            for dy in -1isize..=1 {
+                for dx in -1isize..=1 {
+                    if dx.abs() + dy.abs() <= 1 {
+                        let x = (diamond_x as isize + dx) as usize;
+                        let y = (diamond_y as isize + dy) as usize;
+                        let pixel = (y * width + x) * 4;
+                        frame[pixel..pixel + 4].copy_from_slice(&[190, 186, 165, 255]);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_symbol_with_color(
+        frame: &mut [u8],
+        width: usize,
+        center_x: usize,
+        center_y: usize,
+        color: [u8; 4],
+    ) {
         for (offset_x, offset_y) in [(-4, -4), (4, -4), (-4, 4), (4, 4)] {
             let diamond_x = (center_x as isize + offset_x) as usize;
             let diamond_y = (center_y as isize + offset_y) as usize;
@@ -1025,7 +1599,7 @@ mod tests {
                         let x = (diamond_x as isize + dx) as usize;
                         let y = (diamond_y as isize + dy) as usize;
                         let pixel = (y * width + x) * 4;
-                        frame[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, 255]);
+                        frame[pixel..pixel + 4].copy_from_slice(&color);
                     }
                 }
             }
