@@ -1,10 +1,11 @@
 use crate::frame_processor::{process_frame, ProcessingState};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
-pub fn process_files(input: &str, output: &str) -> Result<(), String> {
-    let message = format!("Process {input} to {output}.");
+pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<(), String> {
+    let message = format!("Process {input} to {output} and {video_output}.");
     let mut output_file = File::create(output)
         .map_err(|error| format!("failed to create output file {output}: {error}"))?;
     writeln!(output_file, "{message}")
@@ -14,7 +15,7 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
     let (width, height, frame_rate_num, frame_rate_den) = video_dimensions(input)?;
     let frame_size = width
         .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| "video frame dimensions are too large".to_string())?;
     let input_uri = file_uri(input)?;
     let mut decoder = Command::new("gst-launch-1.0")
@@ -26,7 +27,7 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
             "!",
             "videoconvert",
             "!",
-            "video/x-raw,format=RGB",
+            "video/x-raw,format=RGBA",
             "!",
             "fdsink",
             "fd=1",
@@ -36,6 +37,12 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| format!("failed to start GStreamer decoder: {error}"))?;
+    let mut video_encoder =
+        start_video_encoder(video_output, width, height, frame_rate_num, frame_rate_den)?;
+    let mut video_frames = video_encoder
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to write encoded video frames".to_string())?;
     let stdout = decoder
         .stdout
         .take()
@@ -66,7 +73,7 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
             break;
         }
 
-        process_frame(&mut state, &frame, &mut output_file)
+        process_frame(&mut state, &frame, &mut output_file, &mut video_frames)
             .map_err(|error| format!("failed to process video frame: {error}"))?;
     }
 
@@ -77,7 +84,82 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
         return Err(format!("GStreamer decoder exited with status {status}"));
     }
 
+    drop(video_frames);
+    let status = video_encoder
+        .wait()
+        .map_err(|error| format!("failed to wait for GStreamer video encoder: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "GStreamer video encoder exited with status {status}"
+        ));
+    }
+
     Ok(())
+}
+
+fn start_video_encoder(
+    output: &str,
+    width: usize,
+    height: usize,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
+) -> Result<Child, String> {
+    let extension = Path::new(output)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let (encoder, encoder_option, parser, muxer) = match extension.as_str() {
+        "mp4" | "m4v" | "mov" => ("x264enc", "tune=zerolatency", Some("h264parse"), "mp4mux"),
+        "mkv" => (
+            "x264enc",
+            "tune=zerolatency",
+            Some("h264parse"),
+            "matroskamux",
+        ),
+        "webm" => ("vp8enc", "deadline=1", None, "webmmux"),
+        _ => {
+            return Err(format!(
+                "unsupported video output extension for {output}; use .mp4, .m4v, .mov, .mkv, or .webm"
+            ));
+        }
+    };
+
+    let mut arguments = vec![
+        "-q".to_string(),
+        "fdsrc".to_string(),
+        "fd=0".to_string(),
+        "!".to_string(),
+        "rawvideoparse".to_string(),
+        "format=rgba".to_string(),
+        format!("width={width}"),
+        format!("height={height}"),
+        format!("framerate={frame_rate_num}/{frame_rate_den}"),
+        "!".to_string(),
+        "videoconvert".to_string(),
+        "!".to_string(),
+        encoder.to_string(),
+        encoder_option.to_string(),
+        "!".to_string(),
+    ];
+    if let Some(parser) = parser {
+        arguments.push(parser.to_string());
+        arguments.push("!".to_string());
+    }
+    arguments.extend([
+        muxer.to_string(),
+        "!".to_string(),
+        "filesink".to_string(),
+        format!("location={output}"),
+    ]);
+
+    Command::new("gst-launch-1.0")
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("failed to start GStreamer video encoder: {error}"))
 }
 
 fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32), String> {

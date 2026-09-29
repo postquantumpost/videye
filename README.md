@@ -1,10 +1,10 @@
 # videye
 A video processing program to extract annotations.
 
-Run it with optional input and output paths:
+Run it with input, text output, and annotated video output paths:
 
 ```sh
-cargo run -- --in inputfile --out outputfile
+cargo run -- --in inputfile --out outputfile --vout annotated.mp4
 ```
 
-Either option may be omitted. The program prints the value of each option provided.
+Processing runs only when all three options are provided. The video output supports MP4, Matroska (`.mkv`), and WebM (`.webm`) files.
