@@ -1,4 +1,6 @@
-use crate::frame_processor::{process_frame, write_history, History, ProcessingState};
+use crate::frame_processor::{
+    process_frame, write_history, write_history_single_line, History, ProcessingState,
+};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
@@ -103,6 +105,9 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
 
     write_history(&history, &mut output_file)
         .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
+    write_history_single_line(&history, &mut output_file).map_err(|error| {
+        format!("failed to write single-line text history to {output}: {error}")
+    })?;
 
     Ok(())
 }

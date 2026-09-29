@@ -154,6 +154,29 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
     Ok(())
 }
 
+#[allow(dead_code)]
+pub(crate) fn write_history_single_line(
+    history: &History,
+    output_file: &mut impl Write,
+) -> io::Result<()> {
+    for entry in history {
+        match entry {
+            HistoryEntry::TextAct(textact) => {
+                let elapsed_seconds = textact.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                writeln!(
+                    output_file,
+                    "{hours}:{minutes}:{seconds} act: {}, {}",
+                    textact.actnumber, textact.acttitle
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn text_crop_between_symbols(
     left: &BoundingBox,
     right: &BoundingBox,
@@ -651,8 +674,25 @@ fn crop_rgba_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_textact, find_diamond_symbols, BoundingBox, Component, HistoryEntry, ProcessingState,
+        add_textact, find_diamond_symbols, write_history_single_line, BoundingBox, Component,
+        HistoryEntry, ProcessingState,
     };
+
+    #[test]
+    fn writes_history_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_textact(
+            &mut history,
+            3_661_000_000_000,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"1:1:1 act: A12, Opening\n");
+    }
 
     #[test]
     fn deduplicates_matching_textacts_within_twenty_seconds() {
