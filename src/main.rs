@@ -1,6 +1,8 @@
 use std::env;
 use std::process;
 
+mod processing;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
@@ -26,12 +28,17 @@ fn run() -> Result<(), String> {
         }
     }
 
-    if let Some(input) = input {
+    
+    if let Some(input) = &input {
         println!("Input: {input}");
     }
-    if let Some(output) = output {
+    if let Some(output) = &output {
         println!("Output: {output}");
     }
-
+    
+    if let (Some(input), Some(output)) = (&input, &output) {
+        processing::process_files(input, output)?;
+    }
+    
     Ok(())
 }
