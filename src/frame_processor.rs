@@ -30,6 +30,24 @@ struct Location1Symbol {
     side: Location1Side,
 }
 
+#[derive(Clone, Copy)]
+struct StoryLine {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+    support: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CombatLine {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+    support: usize,
+}
+
 const MAX_GROUP_ASPECT_RATIO: f32 = 1.2;
 const MAX_COMPONENT_ASPECT_RATIO: f32 = 1.5;
 
@@ -62,10 +80,24 @@ pub(crate) struct Location1 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Story {
+    timestamp_ns: u128,
+    text: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Combat1 {
+    timestamp_ns: u128,
+    text: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HistoryEntry {
     TextAct(TextAct),
     Location1(Location1),
     Location2(Location2),
+    Story(Story),
+    Combat1(Combat1),
 }
 
 pub(crate) type History = Vec<HistoryEntry>;
@@ -179,6 +211,32 @@ pub(crate) fn process_frame(
             }
         }
     }
+
+    if let Some(crop) = find_story_crop(frame, state.frame_width, state.frame_height) {
+        writeln!(
+            output_file,
+            "Story panel: x={} y={} width={} height={}",
+            crop.left, crop.top, crop.width, crop.height
+        )?;
+        let story = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+        let story = story.trim();
+        if !story.is_empty() {
+            add_story(history, elapsed_ns, story.to_string());
+        }
+    }
+
+    if let Some(crop) = find_combat1_crop(frame, state.frame_width, state.frame_height) {
+        writeln!(
+            output_file,
+            "Combat1 lines: x={} y={} width={} height={}",
+            crop.left, crop.top, crop.width, crop.height
+        )?;
+        let text = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+        let text = text.trim();
+        if !text.is_empty() {
+            add_combat1(history, elapsed_ns, text.to_string());
+        }
+    }
     video_output.write_all(&annotated_frame)
 }
 
@@ -198,6 +256,8 @@ fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, act
         }
         HistoryEntry::Location2(_) => false,
         HistoryEntry::Location1(_) => false,
+        HistoryEntry::Story(_) => false,
+        HistoryEntry::Combat1(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::TextAct(TextAct {
@@ -214,6 +274,8 @@ fn add_location2(history: &mut History, timestamp_ns: u128, location2: String) {
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::TextAct(_) => false,
         HistoryEntry::Location1(_) => false,
+        HistoryEntry::Story(_) => false,
+        HistoryEntry::Combat1(_) => false,
         HistoryEntry::Location2(previous) => {
             previous.location2 == location2
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
@@ -236,12 +298,50 @@ fn add_location1(history: &mut History, timestamp_ns: u128, location1: String) {
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
         }
         HistoryEntry::TextAct(_) | HistoryEntry::Location2(_) => false,
+        HistoryEntry::Story(_) => false,
+        HistoryEntry::Combat1(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Location1(Location1 {
             timestamp_ns,
             location1,
         }));
+    }
+}
+
+fn add_story(history: &mut History, timestamp_ns: u128, text: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::Story(previous) => {
+            previous.text == text
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+        HistoryEntry::TextAct(_)
+        | HistoryEntry::Location1(_)
+        | HistoryEntry::Location2(_)
+        | HistoryEntry::Combat1(_) => false,
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Story(Story { timestamp_ns, text }));
+    }
+}
+
+fn add_combat1(history: &mut History, timestamp_ns: u128, text: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::Combat1(previous) => {
+            previous.text == text
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+        HistoryEntry::TextAct(_)
+        | HistoryEntry::Location1(_)
+        | HistoryEntry::Location2(_)
+        | HistoryEntry::Story(_) => false,
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Combat1(Combat1 { timestamp_ns, text }));
     }
 }
 
@@ -284,6 +384,30 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                     "Location1 at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
                 )?;
                 writeln!(output_file, "Location1: {}", location1.location1)?;
+            }
+            HistoryEntry::Story(story) => {
+                let elapsed_seconds = story.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = story.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Story at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Story: {}", story.text)?;
+            }
+            HistoryEntry::Combat1(combat1) => {
+                let elapsed_seconds = combat1.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = combat1.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Combat1 at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Combat1: {}", combat1.text)?;
             }
         }
     }
@@ -328,6 +452,28 @@ pub(crate) fn write_history_single_line(
                     output_file,
                     "{hours}:{minutes}:{seconds} location1: {}",
                     location1.location1
+                )?;
+            }
+            HistoryEntry::Story(story) => {
+                let elapsed_seconds = story.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                writeln!(
+                    output_file,
+                    "{hours}:{minutes}:{seconds} story: {}",
+                    story.text
+                )?;
+            }
+            HistoryEntry::Combat1(combat1) => {
+                let elapsed_seconds = combat1.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                writeln!(
+                    output_file,
+                    "{hours}:{minutes}:{seconds} combat1: {}",
+                    combat1.text
                 )?;
             }
         }
@@ -511,6 +657,404 @@ fn find_location1_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<Location
 
     symbols.sort_by_key(|symbol| symbol.bounds.left);
     symbols
+}
+
+fn find_story_crop(frame: &[u8], width: usize, height: usize) -> Option<BoundingBox> {
+    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || frame.len() < expected_len {
+        return None;
+    }
+
+    let search_top = height.saturating_mul(65) / 100;
+    let search_bottom = height.saturating_mul(90) / 100;
+    let search_left = width.saturating_mul(20) / 100;
+    let search_right = width.saturating_mul(80) / 100;
+    let min_line_width = (width.saturating_mul(14) / 100).max(8);
+    let allowed_gap = (width.saturating_mul(25) / 1_000).max(3);
+    let row_tolerance = (height / 200).max(1);
+    let mut lines = Vec::new();
+    let mut current_line: Option<StoryLine> = None;
+
+    for y in search_top..search_bottom.min(height) {
+        let Some((left, right, support)) = strongest_story_run(
+            frame,
+            width,
+            y,
+            search_left,
+            search_right,
+            allowed_gap,
+            min_line_width,
+        ) else {
+            if let Some(line) = current_line.take() {
+                lines.push(line);
+            }
+            continue;
+        };
+
+        match &mut current_line {
+            Some(line) if y <= line.bottom.saturating_add(row_tolerance) => {
+                line.bottom = y;
+                line.left = line.left.min(left);
+                line.right = line.right.max(right);
+                line.support = line.support.max(support);
+            }
+            Some(_) => {
+                lines.push(current_line.replace(StoryLine {
+                    top: y,
+                    bottom: y,
+                    left,
+                    right,
+                    support,
+                })?);
+            }
+            None => {
+                current_line = Some(StoryLine {
+                    top: y,
+                    bottom: y,
+                    left,
+                    right,
+                    support,
+                });
+            }
+        }
+    }
+    if let Some(line) = current_line {
+        lines.push(line);
+    }
+
+    let min_separation = (height.saturating_mul(25) / 1_000).max(4);
+    let max_separation = (height.saturating_mul(12) / 100).max(min_separation + 1);
+    let mut best_pair: Option<(StoryLine, StoryLine, usize)> = None;
+    for first in 0..lines.len() {
+        for second in first + 1..lines.len() {
+            let top_line = lines[first];
+            let bottom_line = lines[second];
+            let separation = bottom_line.top.saturating_sub(top_line.bottom);
+            if separation < min_separation || separation > max_separation {
+                continue;
+            }
+
+            let overlap = top_line
+                .right
+                .min(bottom_line.right)
+                .saturating_sub(top_line.left.max(bottom_line.left));
+            let shorter_width =
+                (top_line.right - top_line.left).min(bottom_line.right - bottom_line.left);
+            if shorter_width == 0 || overlap * 2 < shorter_width {
+                continue;
+            }
+
+            let score = top_line.support.saturating_add(bottom_line.support);
+            if best_pair.is_none_or(|(_, _, best_score)| score > best_score) {
+                best_pair = Some((top_line, bottom_line, score));
+            }
+        }
+    }
+
+    let (top_line, bottom_line, _) = best_pair?;
+    let left = top_line.left.min(bottom_line.left);
+    let right = top_line.right.max(bottom_line.right);
+    let horizontal_margin = ((right - left) / 20).max(width / 100);
+    let crop_left = left.saturating_sub(horizontal_margin);
+    let crop_right = right.saturating_add(horizontal_margin).min(width);
+    let crop_top = top_line.bottom.saturating_add(1);
+    let crop_bottom = bottom_line.top;
+    (crop_right > crop_left && crop_bottom > crop_top).then_some(BoundingBox {
+        left: crop_left,
+        top: crop_top,
+        width: crop_right - crop_left,
+        height: crop_bottom - crop_top,
+    })
+}
+
+fn find_combat1_crop(frame: &[u8], width: usize, height: usize) -> Option<BoundingBox> {
+    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || frame.len() < expected_len {
+        return None;
+    }
+
+    let search_top = height.saturating_mul(2) / 100;
+    let search_bottom = height.saturating_mul(12) / 100;
+    let search_left = width.saturating_mul(15) / 100;
+    let search_right = width.saturating_mul(85) / 100;
+    let min_line_width = (width.saturating_mul(20) / 100).max(8);
+    let row_tolerance = (height / 500).max(1);
+    let gray_lines = find_combat_lines(
+        frame,
+        width,
+        height,
+        search_top,
+        search_bottom,
+        search_left,
+        search_right,
+        min_line_width,
+        row_tolerance,
+        false,
+    );
+    let red_lines = find_combat_lines(
+        frame,
+        width,
+        height,
+        search_top,
+        search_bottom,
+        search_left,
+        search_right,
+        min_line_width,
+        row_tolerance,
+        true,
+    );
+
+    let min_separation = (height.saturating_mul(4) / 1_000).max(2);
+    let max_separation = (height.saturating_mul(5) / 100).max(min_separation + 1);
+    let mut best_pair: Option<(CombatLine, CombatLine, usize)> = None;
+    for gray_line in &gray_lines {
+        for red_line in &red_lines {
+            let separation = red_line.top.saturating_sub(gray_line.bottom);
+            if red_line.top <= gray_line.bottom
+                || separation < min_separation
+                || separation > max_separation
+            {
+                continue;
+            }
+
+            let overlap = gray_line
+                .right
+                .min(red_line.right)
+                .saturating_sub(gray_line.left.max(red_line.left))
+                .saturating_add(1);
+            let shorter_width =
+                (gray_line.right - gray_line.left + 1).min(red_line.right - red_line.left + 1);
+            if shorter_width == 0 || overlap.saturating_mul(2) < shorter_width {
+                continue;
+            }
+
+            let score = gray_line
+                .support
+                .saturating_add(red_line.support)
+                .saturating_add(overlap);
+            if best_pair.is_none_or(|(_, _, best_score)| score > best_score) {
+                best_pair = Some((*gray_line, *red_line, score));
+            }
+        }
+    }
+
+    let (gray_line, red_line, _) = best_pair?;
+    let left = gray_line.left.min(red_line.left);
+    let right = gray_line.right.max(red_line.right).saturating_add(1);
+    let horizontal_margin = (width / 25).max(2);
+    let crop_left = left.saturating_sub(horizontal_margin);
+    let crop_right = right.saturating_add(horizontal_margin).min(width);
+    let crop_top = red_line
+        .bottom
+        .saturating_add(1)
+        .saturating_add((height / 200).max(2));
+    let crop_height = (height / 20).max(12).min(height.saturating_sub(crop_top));
+    (crop_right > crop_left && crop_height > 0).then_some(BoundingBox {
+        left: crop_left,
+        top: crop_top,
+        width: crop_right - crop_left,
+        height: crop_height,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_combat_lines(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    search_top: usize,
+    search_bottom: usize,
+    search_left: usize,
+    search_right: usize,
+    min_line_width: usize,
+    row_tolerance: usize,
+    red: bool,
+) -> Vec<CombatLine> {
+    let mut lines = Vec::new();
+    let mut current_line: Option<CombatLine> = None;
+
+    for y in search_top..search_bottom.min(height) {
+        let run = strongest_combat_run(
+            frame,
+            width,
+            y,
+            search_left,
+            search_right,
+            min_line_width,
+            red,
+        );
+        let Some((left, right, support)) = run else {
+            if let Some(line) = current_line.take() {
+                lines.push(line);
+            }
+            continue;
+        };
+
+        match &mut current_line {
+            Some(line) if y <= line.bottom.saturating_add(row_tolerance) => {
+                line.bottom = y;
+                line.left = line.left.min(left);
+                line.right = line.right.max(right);
+                line.support = line.support.max(support);
+            }
+            Some(_) => {
+                lines.push(
+                    current_line
+                        .replace(CombatLine {
+                            top: y,
+                            bottom: y,
+                            left,
+                            right,
+                            support,
+                        })
+                        .expect("current combat line is present"),
+                );
+            }
+            None => {
+                current_line = Some(CombatLine {
+                    top: y,
+                    bottom: y,
+                    left,
+                    right,
+                    support,
+                });
+            }
+        }
+    }
+    if let Some(line) = current_line {
+        lines.push(line);
+    }
+    lines
+}
+
+fn strongest_combat_run(
+    frame: &[u8],
+    width: usize,
+    y: usize,
+    search_left: usize,
+    search_right: usize,
+    min_line_width: usize,
+    red: bool,
+) -> Option<(usize, usize, usize)> {
+    let mut run_start = None;
+    let mut last_support = 0;
+    let mut support = 0;
+    let mut best = None;
+
+    for x in search_left..search_right.min(width) {
+        if is_combat_line_pixel(frame, width, x, y, red) {
+            if run_start.is_none() {
+                run_start = Some(x);
+            }
+            last_support = x;
+            support += 1;
+        } else if run_start.is_some() && x.saturating_sub(last_support) > 2 {
+            update_combat_run(
+                &mut best,
+                run_start.take()?,
+                last_support,
+                support,
+                min_line_width,
+            );
+            support = 0;
+        }
+    }
+    if let Some(run_start) = run_start {
+        update_combat_run(&mut best, run_start, last_support, support, min_line_width);
+    }
+    best
+}
+
+fn update_combat_run(
+    best: &mut Option<(usize, usize, usize)>,
+    left: usize,
+    right: usize,
+    support: usize,
+    min_line_width: usize,
+) {
+    let span = right.saturating_sub(left) + 1;
+    if span >= min_line_width && support.saturating_mul(2) >= span {
+        if best.is_none_or(|(_, _, best_support)| support > best_support) {
+            *best = Some((left, right, support));
+        }
+    }
+}
+
+fn is_combat_line_pixel(frame: &[u8], width: usize, x: usize, y: usize, red: bool) -> bool {
+    let pixel = (y * width + x) * 4;
+    let red_value = u16::from(frame[pixel]);
+    let green = u16::from(frame[pixel + 1]);
+    let blue = u16::from(frame[pixel + 2]);
+    if red {
+        red_value >= 150
+            && red_value > green.saturating_mul(3) / 2
+            && red_value > blue.saturating_mul(3) / 2
+            && green < 130
+            && blue < 130
+    } else {
+        let minimum = red_value.min(green).min(blue);
+        let maximum = red_value.max(green).max(blue);
+        minimum >= 70 && maximum <= 220 && maximum - minimum <= 35
+    }
+}
+
+fn strongest_story_run(
+    frame: &[u8],
+    width: usize,
+    y: usize,
+    search_left: usize,
+    search_right: usize,
+    allowed_gap: usize,
+    min_line_width: usize,
+) -> Option<(usize, usize, usize)> {
+    let mut run_start = None;
+    let mut last_support = 0;
+    let mut support = 0;
+    let mut best = None;
+
+    for x in search_left..search_right.min(width) {
+        let pixel = (y * width + x) * 4;
+        let red = u32::from(frame[pixel]);
+        let green = u32::from(frame[pixel + 1]);
+        let blue = u32::from(frame[pixel + 2]);
+        let luma = (299 * red + 587 * green + 114 * blue) / 1_000;
+        if luma >= 96 {
+            if run_start.is_none() {
+                run_start = Some(x);
+            }
+            last_support = x;
+            support += 1;
+        } else if run_start.is_some() && x.saturating_sub(last_support) > allowed_gap {
+            update_story_run(
+                &mut best,
+                run_start.take()?,
+                last_support,
+                support,
+                min_line_width,
+            );
+            support = 0;
+        }
+    }
+
+    if let Some(run_start) = run_start {
+        update_story_run(&mut best, run_start, last_support, support, min_line_width);
+    }
+    best
+}
+
+fn update_story_run(
+    best: &mut Option<(usize, usize, usize)>,
+    left: usize,
+    right: usize,
+    support: usize,
+    min_line_width: usize,
+) {
+    let span = right.saturating_sub(left) + 1;
+    if span >= min_line_width && support.saturating_mul(2) >= span {
+        if best.is_none_or(|(_, _, best_support)| support > best_support) {
+            *best = Some((left, right, support));
+        }
+    }
 }
 
 fn is_location1_pixel(frame: &[u8], width: usize, x: usize, y: usize) -> bool {
@@ -1057,9 +1601,10 @@ fn crop_rgba_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_location1, add_location2, add_textact, find_diamond_symbols, find_location1_symbols,
-        find_location_symbols, write_history_single_line, BoundingBox, Component, HistoryEntry,
-        Location1Side, ProcessingState,
+        add_combat1, add_location1, add_location2, add_story, add_textact, find_combat1_crop,
+        find_diamond_symbols, find_location1_symbols, find_location_symbols, find_story_crop,
+        write_history_single_line, BoundingBox, Component, HistoryEntry, Location1Side,
+        ProcessingState,
     };
 
     #[test]
@@ -1105,6 +1650,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_story_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_story(&mut history, 2_000_000_000, "From the darkness".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"0:0:2 story: From the darkness\n");
+    }
+
+    #[test]
+    fn writes_combat1_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_combat1(&mut history, 2_000_000_000, "RYUZO".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"0:0:2 combat1: RYUZO\n");
+    }
+
+    #[test]
     fn deduplicates_matching_textacts_within_twenty_seconds() {
         let mut history = Vec::new();
         add_textact(
@@ -1138,6 +1705,8 @@ mod tests {
                 HistoryEntry::TextAct(textact) => textact.timestamp_ns,
                 HistoryEntry::Location1(_) => panic!("unexpected Location1 entry"),
                 HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
+                HistoryEntry::Story(_) => panic!("unexpected Story entry"),
+                HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
             })
             .collect();
         assert_eq!(
@@ -1249,6 +1818,90 @@ mod tests {
     }
 
     #[test]
+    fn finds_story_crop_between_bright_segmented_horizontal_rules() {
+        let width = 480;
+        let height = 300;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for y in [220, 221, 250, 251] {
+            for x in 120..360 {
+                let gap = x % 43 < 5;
+                let intensity = if x % 31 < 13 {
+                    [150, 130, 90, 255]
+                } else {
+                    [110, 95, 65, 255]
+                };
+                let pixel = (y * width + x) * 4;
+                if !gap {
+                    frame[pixel..pixel + 4].copy_from_slice(&intensity);
+                }
+            }
+        }
+        let crop = find_story_crop(&frame, width, height).unwrap();
+
+        assert_eq!(crop.top, 222);
+        assert_eq!(crop.height, 28);
+        assert!(crop.left < 120);
+        assert!(crop.left + crop.width > 360);
+    }
+
+    #[test]
+    fn finds_combat1_crop_below_overlapping_gray_and_red_rules() {
+        let width = 200;
+        let height = 200;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for (y, color) in [(12, [150, 150, 150, 255]), (22, [230, 40, 55, 255])] {
+            for x in 30..170 {
+                let pixel = (y * width + x) * 4;
+                frame[pixel..pixel + 4].copy_from_slice(&color);
+            }
+        }
+
+        assert_eq!(
+            find_combat1_crop(&frame, width, height),
+            Some(BoundingBox {
+                left: 22,
+                top: 25,
+                width: 156,
+                height: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn deduplicates_matching_story_entries_within_twenty_seconds() {
+        let mut history = Vec::new();
+        add_story(&mut history, 1_000_000_000, "From the darkness".to_string());
+        add_story(
+            &mut history,
+            20_000_000_000,
+            "From the darkness".to_string(),
+        );
+        add_story(
+            &mut history,
+            21_000_000_001,
+            "From the darkness".to_string(),
+        );
+
+        let stories: Vec<&str> = history
+            .iter()
+            .map(|entry| match entry {
+                HistoryEntry::TextAct(_) => panic!("unexpected TextAct entry"),
+                HistoryEntry::Location1(_) => panic!("unexpected Location1 entry"),
+                HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
+                HistoryEntry::Story(story) => story.text.as_str(),
+                HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
+            })
+            .collect();
+        assert_eq!(stories, vec!["From the darkness", "From the darkness"]);
+    }
+
+    #[test]
     fn deduplicates_matching_location2_entries_within_twenty_seconds() {
         let mut history = Vec::new();
         add_location2(
@@ -1273,6 +1926,8 @@ mod tests {
                 HistoryEntry::TextAct(_) => panic!("unexpected TextAct entry"),
                 HistoryEntry::Location1(_) => panic!("unexpected Location1 entry"),
                 HistoryEntry::Location2(location) => location.location2.as_str(),
+                HistoryEntry::Story(_) => panic!("unexpected Story entry"),
+                HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
             })
             .collect();
         assert_eq!(
@@ -1294,6 +1949,8 @@ mod tests {
                 HistoryEntry::TextAct(_) => panic!("unexpected TextAct entry"),
                 HistoryEntry::Location1(location) => location.location1.as_str(),
                 HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
+                HistoryEntry::Story(_) => panic!("unexpected Story entry"),
+                HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
             })
             .collect();
         assert_eq!(locations, vec!["Kin Prefecture", "Kin Prefecture"]);
