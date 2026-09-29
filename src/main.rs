@@ -2,6 +2,7 @@ use std::env;
 use std::process;
 
 mod processing;
+mod frame_processor;
 
 fn main() {
     if let Err(error) = run() {

@@ -1,13 +1,7 @@
+use crate::frame_processor::{process_frame, ProcessingState};
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
-
-struct ProcessingState {
-    current_frame: u64,
-    frame_width: usize,
-    frame_height: usize,
-    frame_size: usize,
-}
 
 pub fn process_files(input: &str, output: &str) -> Result<(), String> {
     let message = format!("Process {input} to {output}.");
@@ -17,7 +11,7 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
         .map_err(|error| format!("failed to write output file {output}: {error}"))?;
     println!("{message}");
 
-    let (width, height) = video_dimensions(input)?;
+    let (width, height, frame_rate_num, frame_rate_den) = video_dimensions(input)?;
     let frame_size = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(3))
@@ -52,6 +46,8 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
         frame_width: width,
         frame_height: height,
         frame_size,
+        frame_rate_num,
+        frame_rate_den,
     };
     let mut frame = vec![0; state.frame_size];
 
@@ -84,7 +80,7 @@ pub fn process_files(input: &str, output: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn video_dimensions(input: &str) -> Result<(usize, usize), String> {
+fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32), String> {
     let result = Command::new("gst-discoverer-1.0")
         .arg(input)
         .output()
@@ -96,6 +92,7 @@ fn video_dimensions(input: &str) -> Result<(usize, usize), String> {
     let details = String::from_utf8_lossy(&result.stdout);
     let mut width = None;
     let mut height = None;
+    let mut frame_rate = None;
     for line in details.lines() {
         if width.is_none() {
             width = line
@@ -109,10 +106,23 @@ fn video_dimensions(input: &str) -> Result<(usize, usize), String> {
                 .strip_prefix("Height:")
                 .and_then(|value| value.trim().parse().ok());
         }
+        if frame_rate.is_none() {
+            frame_rate = line
+                .trim()
+                .strip_prefix("Frame rate:")
+                .and_then(|value| value.trim().split_once('/'))
+                .and_then(|(numerator, denominator)| {
+                    Some((numerator.parse().ok()?, denominator.parse().ok()?))
+                });
+        }
     }
 
-    match (width, height) {
-        (Some(width), Some(height)) if width > 0 && height > 0 => Ok((width, height)),
+    match (width, height, frame_rate) {
+        (Some(width), Some(height), Some((rate_num, rate_den)))
+            if width > 0 && height > 0 && rate_num > 0 && rate_den > 0 =>
+        {
+            Ok((width, height, rate_num, rate_den))
+        }
         _ => Err(format!("could not determine video dimensions for {input}")),
     }
 }
@@ -129,20 +139,4 @@ fn file_uri(input: &str) -> Result<String, String> {
         }
     }
     Ok(uri)
-}
-
-fn process_frame(
-    state: &mut ProcessingState,
-    frame: &[u8],
-    output_file: &mut File,
-) -> io::Result<()> {
-    state.current_frame += 1;
-    writeln!(
-        output_file,
-        "Frame {}: {}x{} ({} RGB bytes)",
-        state.current_frame,
-        state.frame_width,
-        state.frame_height,
-        frame.len()
-    )
 }
