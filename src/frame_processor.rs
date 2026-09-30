@@ -105,10 +105,10 @@ pub(crate) type History = Vec<HistoryEntry>;
 pub(crate) fn process_frame(
     state: &mut ProcessingState,
     frame: &[u8],
-    output_file: &mut File,
-    video_output: &mut impl Write,
+    output_file: &mut impl Write,
+    annotate_frame: bool,
     history: &mut History,
-) -> io::Result<()> {
+) -> io::Result<Option<Vec<u8>>> {
     state.current_frame += 1;
     let elapsed_ns = frame_timestamp_ns(state);
     let elapsed_seconds = elapsed_ns / 1_000_000_000;
@@ -131,9 +131,11 @@ pub(crate) fn process_frame(
     writeln!(output_file, "{hours:02}:{minutes:02}:{seconds:02}")?;
 
     let symbols = find_diamond_symbols(state, frame);
-    let mut annotated_frame = frame.to_vec();
+    let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
     for symbol in &symbols {
-        draw_bounding_box(&mut annotated_frame, state.frame_width, symbol);
+        if let Some(annotated_frame) = &mut annotated_frame {
+            draw_bounding_box(annotated_frame, state.frame_width, symbol);
+        }
         writeln!(
             output_file,
             "Diamond symbol: x={} y={} width={} height={}",
@@ -146,7 +148,13 @@ pub(crate) fn process_frame(
         if let Some(crop) =
             text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
         {
-            let text = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let text = recognize_text(
+                frame,
+                state.frame_width,
+                state.frame_height,
+                &crop,
+                state.current_frame,
+            );
             if !text.trim().is_empty() {
                 actnumber = Some(text.trim().to_string());
             }
@@ -154,7 +162,13 @@ pub(crate) fn process_frame(
         if let Some(crop) =
             title_crop_below_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
         {
-            let title = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let title = recognize_text(
+                frame,
+                state.frame_width,
+                state.frame_height,
+                &crop,
+                state.current_frame,
+            );
             if !title.trim().is_empty() {
                 acttitle = Some(title.trim().to_string());
             }
@@ -166,7 +180,9 @@ pub(crate) fn process_frame(
 
     let location_symbols = find_location_symbols(state, frame);
     for symbol in &location_symbols {
-        draw_bounding_box(&mut annotated_frame, state.frame_width, symbol);
+        if let Some(annotated_frame) = &mut annotated_frame {
+            draw_bounding_box(annotated_frame, state.frame_width, symbol);
+        }
         writeln!(
             output_file,
             "Location2 symbol: x={} y={} width={} height={}",
@@ -177,7 +193,13 @@ pub(crate) fn process_frame(
         if let Some(crop) =
             text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
         {
-            let location2 = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let location2 = recognize_text(
+                frame,
+                state.frame_width,
+                state.frame_height,
+                &crop,
+                state.current_frame,
+            );
             let location2 = location2.trim();
             if !location2.is_empty() {
                 add_location2(history, elapsed_ns, location2.to_string());
@@ -187,7 +209,9 @@ pub(crate) fn process_frame(
 
     let location1_symbols = find_location1_symbols(state, frame);
     for symbol in &location1_symbols {
-        draw_bounding_box(&mut annotated_frame, state.frame_width, &symbol.bounds);
+        if let Some(annotated_frame) = &mut annotated_frame {
+            draw_bounding_box(annotated_frame, state.frame_width, &symbol.bounds);
+        }
         writeln!(
             output_file,
             "Location1 symbol: x={} y={} width={} height={}",
@@ -204,7 +228,13 @@ pub(crate) fn process_frame(
             state.frame_width,
             state.frame_height,
         ) {
-            let location1 = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+            let location1 = recognize_text(
+                frame,
+                state.frame_width,
+                state.frame_height,
+                &crop,
+                state.current_frame,
+            );
             let location1 = location1.trim();
             if !location1.is_empty() {
                 add_location1(history, elapsed_ns, location1.to_string());
@@ -218,7 +248,13 @@ pub(crate) fn process_frame(
             "Story panel: x={} y={} width={} height={}",
             crop.left, crop.top, crop.width, crop.height
         )?;
-        let story = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+        let story = recognize_text(
+            frame,
+            state.frame_width,
+            state.frame_height,
+            &crop,
+            state.current_frame,
+        );
         let story = story.trim();
         if !story.is_empty() {
             add_story(history, elapsed_ns, story.to_string());
@@ -231,13 +267,19 @@ pub(crate) fn process_frame(
             "Combat1 lines: x={} y={} width={} height={}",
             crop.left, crop.top, crop.width, crop.height
         )?;
-        let text = recognize_text(frame, state.frame_width, state.frame_height, &crop)?;
+        let text = recognize_text(
+            frame,
+            state.frame_width,
+            state.frame_height,
+            &crop,
+            state.current_frame,
+        );
         let text = text.trim();
         if !text.is_empty() {
             add_combat1(history, elapsed_ns, text.to_string());
         }
     }
-    video_output.write_all(&annotated_frame)
+    Ok(annotated_frame)
 }
 
 fn frame_timestamp_ns(state: &ProcessingState) -> u128 {
@@ -342,6 +384,29 @@ fn add_combat1(history: &mut History, timestamp_ns: u128, text: String) {
     });
     if !is_duplicate {
         history.push(HistoryEntry::Combat1(Combat1 { timestamp_ns, text }));
+    }
+}
+
+pub(crate) fn merge_history(history: &mut History, frame_history: History) {
+    for entry in frame_history {
+        match entry {
+            HistoryEntry::TextAct(textact) => add_textact(
+                history,
+                textact.timestamp_ns,
+                textact.actnumber,
+                textact.acttitle,
+            ),
+            HistoryEntry::Location1(location1) => {
+                add_location1(history, location1.timestamp_ns, location1.location1)
+            }
+            HistoryEntry::Location2(location2) => {
+                add_location2(history, location2.timestamp_ns, location2.location2)
+            }
+            HistoryEntry::Story(story) => add_story(history, story.timestamp_ns, story.text),
+            HistoryEntry::Combat1(combat1) => {
+                add_combat1(history, combat1.timestamp_ns, combat1.text)
+            }
+        }
     }
 }
 
@@ -1522,6 +1587,26 @@ fn recognize_text(
     frame_width: usize,
     frame_height: usize,
     crop: &BoundingBox,
+    frame_number: u64,
+) -> String {
+    ocr_result_or_empty(
+        recognize_text_inner(frame, frame_width, frame_height, crop),
+        frame_number,
+    )
+}
+
+fn ocr_result_or_empty(result: io::Result<String>, frame_number: u64) -> String {
+    result.unwrap_or_else(|error| {
+        eprintln!("OCR failed on frame {frame_number}: {error}");
+        String::new()
+    })
+}
+
+fn recognize_text_inner(
+    frame: &[u8],
+    frame_width: usize,
+    frame_height: usize,
+    crop: &BoundingBox,
 ) -> io::Result<String> {
     let rgb_crop = crop_rgba_to_rgb(frame, frame_width, frame_height, crop)?;
     let mut tesseract = Command::new("tesseract")
@@ -2167,6 +2252,19 @@ mod tests {
             super::crop_rgba_to_rgb(&frame, 3, 2, &crop).unwrap(),
             vec![4, 5, 6, 8, 9, 10, 16, 17, 18, 20, 21, 22]
         );
+    }
+
+    #[test]
+    fn does_not_propagate_ocr_failures() {
+        let text = super::ocr_result_or_empty(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "simulated Tesseract failure",
+            )),
+            7,
+        );
+
+        assert!(text.is_empty());
     }
 
     fn diamond_component(center_x: usize, center_y: usize, radius: usize) -> Component {

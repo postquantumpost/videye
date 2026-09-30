@@ -1,10 +1,10 @@
 # videye
 A video processing program to extract annotations.
 
-Run it with input, text output, and annotated video output paths:
+Run it with input and text output paths. Add `--vout` to also write an annotated video:
 
 ```sh
-cargo run -- --in inputfile --out outputfile --vout annotated.mp4
+cargo run -- --in inputfile --out outputfile [--vout annotated.mp4] [--parallel-count 4]
 ```
 
-Processing runs only when all three options are provided. The video output supports MP4, Matroska (`.mkv`), and WebM (`.webm`) files.
+Frame processing uses four worker threads by default; set `--parallel-count` to change the number of concurrent workers. The video output supports MP4, Matroska (`.mkv`), and WebM (`.webm`) files.

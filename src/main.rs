@@ -7,7 +7,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile --vout video_outputfile");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count]");
         process::exit(2);
     }
 }
@@ -17,6 +17,7 @@ fn run() -> Result<(), String> {
     let mut input = None;
     let mut output = None;
     let mut video_output = None;
+    let mut parallel_count = 4;
 
     while let Some(argument) = arguments.next() {
         let value = arguments
@@ -27,6 +28,14 @@ fn run() -> Result<(), String> {
             "--in" => input = Some(value),
             "--out" => output = Some(value),
             "--vout" => video_output = Some(value),
+            "--parallel-count" => {
+                parallel_count = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid parallel count: {value}"))?;
+                if parallel_count == 0 {
+                    return Err("parallel count must be greater than zero".to_string());
+                }
+            }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
@@ -41,8 +50,8 @@ fn run() -> Result<(), String> {
         println!("Video output: {video_output}");
     }
 
-    if let (Some(input), Some(output), Some(video_output)) = (&input, &output, &video_output) {
-        processing::process_files(input, output, video_output)?;
+    if let (Some(input), Some(output)) = (&input, &output) {
+        processing::process_files(input, output, video_output.as_deref(), parallel_count)?;
     }
 
     Ok(())

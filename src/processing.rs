@@ -1,13 +1,31 @@
 use crate::frame_processor::{
-    process_frame, write_history, write_history_single_line, History, ProcessingState,
+    merge_history, process_frame, write_history, write_history_single_line, History,
+    ProcessingState,
 };
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Instant;
 
-pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<(), String> {
-    let message = format!("Process {input} to {output} and {video_output}.");
+struct FrameProcessingResult {
+    log: Vec<u8>,
+    annotated_frame: Option<Vec<u8>>,
+    history: History,
+}
+
+pub fn process_files(
+    input: &str,
+    output: &str,
+    video_output: Option<&str>,
+    parallel_count: usize,
+) -> Result<(), String> {
+    let started_at = Instant::now();
+    let message = match video_output {
+        Some(video_output) => format!("Process {input} to {output} and {video_output}."),
+        None => format!("Process {input} to {output}."),
+    };
     let mut output_file = File::create(output)
         .map_err(|error| format!("failed to create output file {output}: {error}"))?;
     writeln!(output_file, "{message}")
@@ -39,12 +57,20 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| format!("failed to start GStreamer decoder: {error}"))?;
-    let mut video_encoder =
-        start_video_encoder(video_output, width, height, frame_rate_num, frame_rate_den)?;
+    let mut video_encoder = video_output
+        .map(|video_output| {
+            start_video_encoder(video_output, width, height, frame_rate_num, frame_rate_den)
+        })
+        .transpose()?;
     let mut video_frames = video_encoder
-        .stdin
-        .take()
-        .ok_or_else(|| "failed to write encoded video frames".to_string())?;
+        .as_mut()
+        .map(|encoder| {
+            encoder
+                .stdin
+                .take()
+                .ok_or_else(|| "failed to write encoded video frames".to_string())
+        })
+        .transpose()?;
     let stdout = decoder
         .stdout
         .take()
@@ -59,31 +85,47 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
         frame_rate_den,
     };
     let mut history = History::new();
-    let mut frame = vec![0; state.frame_size];
-
     loop {
-        let mut bytes_read = 0;
-        while bytes_read < state.frame_size {
-            match frames.read(&mut frame[bytes_read..]) {
-                Ok(0) if bytes_read == 0 => break,
-                Ok(0) => return Err("decoder returned an incomplete video frame".to_string()),
-                Ok(count) => bytes_read += count,
-                Err(error) => return Err(format!("failed to read decoded video frame: {error}")),
+        let mut frame_batch = Vec::with_capacity(parallel_count);
+        for _ in 0..parallel_count {
+            let mut frame = vec![0; state.frame_size];
+            let mut bytes_read = 0;
+            while bytes_read < state.frame_size {
+                match frames.read(&mut frame[bytes_read..]) {
+                    Ok(0) if bytes_read == 0 => break,
+                    Ok(0) => return Err("decoder returned an incomplete video frame".to_string()),
+                    Ok(count) => bytes_read += count,
+                    Err(error) => {
+                        return Err(format!("failed to read decoded video frame: {error}"))
+                    }
+                }
             }
+
+            if bytes_read == 0 {
+                break;
+            }
+            frame_batch.push(frame);
         }
 
-        if bytes_read == 0 {
+        if frame_batch.is_empty() {
             break;
         }
 
-        process_frame(
-            &mut state,
-            &frame,
-            &mut output_file,
-            &mut video_frames,
-            &mut history,
-        )
-        .map_err(|error| format!("failed to process video frame: {error}"))?;
+        let results = process_frame_batch(frame_batch, &state, video_output.is_some())?;
+        for result in results {
+            output_file
+                .write_all(&result.log)
+                .map_err(|error| format!("failed to write frame log: {error}"))?;
+            if let (Some(video_frames), Some(annotated_frame)) =
+                (video_frames.as_mut(), result.annotated_frame)
+            {
+                video_frames
+                    .write_all(&annotated_frame)
+                    .map_err(|error| format!("failed to write encoded video frame: {error}"))?;
+            }
+            merge_history(&mut history, result.history);
+            state.current_frame += 1;
+        }
     }
 
     let status = decoder
@@ -94,13 +136,15 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
     }
 
     drop(video_frames);
-    let status = video_encoder
-        .wait()
-        .map_err(|error| format!("failed to wait for GStreamer video encoder: {error}"))?;
-    if !status.success() {
-        return Err(format!(
-            "GStreamer video encoder exited with status {status}"
-        ));
+    if let Some(mut video_encoder) = video_encoder {
+        let status = video_encoder
+            .wait()
+            .map_err(|error| format!("failed to wait for GStreamer video encoder: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "GStreamer video encoder exited with status {status}"
+            ));
+        }
     }
 
     write_history(&history, &mut output_file)
@@ -109,7 +153,80 @@ pub fn process_files(input: &str, output: &str, video_output: &str) -> Result<()
         format!("failed to write single-line text history to {output}: {error}")
     })?;
 
+    let elapsed_seconds = started_at.elapsed().as_secs_f64();
+    let frames_per_second = if elapsed_seconds > 0.0 {
+        state.current_frame as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
+    println!(
+        "Processed {} frames in {:.2} seconds ({:.2} FPS).",
+        state.current_frame, elapsed_seconds, frames_per_second
+    );
+
     Ok(())
+}
+
+fn process_frame_batch(
+    frames: Vec<Vec<u8>>,
+    state: &ProcessingState,
+    annotate_frames: bool,
+) -> Result<Vec<FrameProcessingResult>, String> {
+    let frame_width = state.frame_width;
+    let frame_height = state.frame_height;
+    let frame_size = state.frame_size;
+    let frame_rate_num = state.frame_rate_num;
+    let frame_rate_den = state.frame_rate_den;
+    let first_frame_number = state.current_frame;
+
+    thread::scope(|scope| {
+        let handles = frames
+            .into_iter()
+            .enumerate()
+            .map(|(offset, frame)| {
+                let current_frame = first_frame_number + offset as u64;
+                scope.spawn(move || -> Result<FrameProcessingResult, String> {
+                    let mut frame_state = ProcessingState {
+                        current_frame,
+                        frame_width,
+                        frame_height,
+                        frame_size,
+                        frame_rate_num,
+                        frame_rate_den,
+                    };
+                    let mut log = Vec::new();
+                    let mut history = History::new();
+                    let annotated_frame = process_frame(
+                        &mut frame_state,
+                        &frame,
+                        &mut log,
+                        annotate_frames,
+                        &mut history,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "failed to process video frame {}: {error}",
+                            current_frame + 1
+                        )
+                    })?;
+                    Ok(FrameProcessingResult {
+                        log,
+                        annotated_frame,
+                        history,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let result = handle
+                .join()
+                .map_err(|_| "frame processing thread panicked".to_string())??;
+            results.push(result);
+        }
+        Ok(results)
+    })
 }
 
 fn start_video_encoder(
