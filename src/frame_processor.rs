@@ -58,6 +58,7 @@ pub(crate) struct ProcessingState {
     pub(crate) frame_size: usize,
     pub(crate) frame_rate_num: u32,
     pub(crate) frame_rate_den: u32,
+    pub(crate) check_story_line_width: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,6 +143,13 @@ pub(crate) fn process_frame(
         )?;
     }
     for pair in symbols.windows(2) {
+        if !horizontal_span_is_centered(
+            pair[0].left,
+            pair[1].left.saturating_add(pair[1].width),
+            state.frame_width,
+        ) {
+            continue;
+        }
         let mut actnumber = None;
         let mut acttitle = None;
         if let Some(crop) =
@@ -241,7 +249,12 @@ pub(crate) fn process_frame(
         }
     }
 
-    if let Some(crop) = find_story_crop(frame, state.frame_width, state.frame_height) {
+    if let Some(crop) = find_story_crop(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        state.check_story_line_width,
+    ) {
         writeln!(
             output_file,
             "Story panel: x={} y={} width={} height={}",
@@ -284,6 +297,22 @@ pub(crate) fn process_frame(
 fn frame_timestamp_ns(state: &ProcessingState) -> u128 {
     u128::from(state.current_frame - 1) * u128::from(state.frame_rate_den) * 1_000_000_000
         / u128::from(state.frame_rate_num)
+}
+
+fn horizontal_span_is_centered(left: usize, right: usize, width: usize) -> bool {
+    width > 0 && right > left && left.saturating_add(right).abs_diff(width) <= width / 10
+}
+
+fn story_line_height_matches_ratio(line_height: usize, frame_height: usize) -> bool {
+    const REFERENCE_HEIGHT: u128 = 2_160;
+    const REFERENCE_LINE_HEIGHT: u128 = 8;
+
+    if line_height == 0 || frame_height == 0 {
+        return false;
+    }
+    let actual_scaled = line_height as u128 * REFERENCE_HEIGHT;
+    let expected_scaled = frame_height as u128 * REFERENCE_LINE_HEIGHT;
+    actual_scaled * 10 >= expected_scaled * 9 && actual_scaled * 10 <= expected_scaled * 11
 }
 
 fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, acttitle: String) {
@@ -728,7 +757,12 @@ fn find_location1_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<Location
     symbols
 }
 
-fn find_story_crop(frame: &[u8], width: usize, height: usize) -> Option<BoundingBox> {
+fn find_story_crop(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    check_line_width: bool,
+) -> Option<BoundingBox> {
     const TOP_LINE_Y_RATIO: f32 = 1604.0 / 2160.0;
     const BOTTOM_LINE_Y_RATIO: f32 = 1716.0 / 2160.0;
     const LINE_Y_TOLERANCE_RATIO: f32 = 0.02;
@@ -812,8 +846,22 @@ fn find_story_crop(frame: &[u8], width: usize, height: usize) -> Option<Bounding
             {
                 continue;
             }
+            let top_line_height = top_line.bottom - top_line.top + 1;
+            let bottom_line_height = bottom_line.bottom - bottom_line.top + 1;
+            if check_line_width
+                && (!story_line_height_matches_ratio(top_line_height, height)
+                    || !story_line_height_matches_ratio(bottom_line_height, height))
+            {
+                continue;
+            }
             let separation = bottom_line.top.saturating_sub(top_line.bottom);
             if separation < min_separation || separation > max_separation {
+                continue;
+            }
+
+            let line_left = top_line.left.min(bottom_line.left);
+            let line_right = top_line.right.max(bottom_line.right);
+            if !horizontal_span_is_centered(line_left, line_right, width) {
                 continue;
             }
 
@@ -1706,8 +1754,8 @@ mod tests {
     use super::{
         add_combat1, add_location1, add_location2, add_story, add_textact, find_combat1_crop,
         find_diamond_symbols, find_location1_symbols, find_location_symbols, find_story_crop,
-        write_history_single_line, BoundingBox, Component, HistoryEntry, Location1Side,
-        ProcessingState,
+        horizontal_span_is_centered, write_history_single_line, BoundingBox, Component,
+        HistoryEntry, Location1Side, ProcessingState,
     };
 
     #[test]
@@ -1838,6 +1886,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
+            check_story_line_width: false,
         };
 
         assert_eq!(
@@ -1876,6 +1925,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
+            check_story_line_width: false,
         };
 
         assert_eq!(
@@ -1915,6 +1965,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
+            check_story_line_width: false,
         };
 
         let symbols = find_location1_symbols(&state, &frame);
@@ -1934,7 +1985,7 @@ mod tests {
         for pixel in frame.chunks_exact_mut(4) {
             pixel[3] = 255;
         }
-        for y in [223, 224, 238, 239] {
+        for y in [223, 238] {
             for x in 120..360 {
                 let gap = x % 43 < 5;
                 let intensity = if x % 31 < 13 {
@@ -1948,12 +1999,64 @@ mod tests {
                 }
             }
         }
-        let crop = find_story_crop(&frame, width, height).unwrap();
+        let crop = find_story_crop(&frame, width, height, true).unwrap();
 
-        assert_eq!(crop.top, 225);
-        assert_eq!(crop.height, 13);
+        assert_eq!(crop.top, 224);
+        assert_eq!(crop.height, 14);
         assert!(crop.left < 120);
         assert!(crop.left + crop.width > 360);
+    }
+
+    #[test]
+    fn rejects_off_center_story_rules() {
+        let width = 480;
+        let height = 300;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for y in [223, 238] {
+            for x in 180..420 {
+                let pixel = (y * width + x) * 4;
+                frame[pixel..pixel + 4].copy_from_slice(&[150, 130, 90, 255]);
+            }
+        }
+
+        assert!(find_story_crop(&frame, width, height, true).is_none());
+    }
+
+    #[test]
+    fn horizontal_center_tolerance_is_five_percent() {
+        assert!(horizontal_span_is_centered(144, 384, 480));
+        assert!(!horizontal_span_is_centered(145, 385, 480));
+    }
+
+    #[test]
+    fn story_line_thickness_scales_with_frame_height() {
+        assert!(super::story_line_height_matches_ratio(8, 2_160));
+        assert!(!super::story_line_height_matches_ratio(7, 2_160));
+        assert!(!super::story_line_height_matches_ratio(9, 2_160));
+        assert!(super::story_line_height_matches_ratio(1, 300));
+        assert!(!super::story_line_height_matches_ratio(2, 300));
+    }
+
+    #[test]
+    fn story_line_width_check_can_be_disabled() {
+        let width = 480;
+        let height = 300;
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for y in [223, 224, 238, 239] {
+            for x in 120..360 {
+                let pixel = (y * width + x) * 4;
+                frame[pixel..pixel + 4].copy_from_slice(&[150, 130, 90, 255]);
+            }
+        }
+
+        assert!(find_story_crop(&frame, width, height, false).is_some());
+        assert!(find_story_crop(&frame, width, height, true).is_none());
     }
 
     #[test]
@@ -2096,6 +2199,7 @@ mod tests {
             frame_size: width * height * 4,
             frame_rate_num: 1,
             frame_rate_den: 1,
+            check_story_line_width: false,
         };
 
         assert!(super::find_diamond_symbols(&state, &frame).is_empty());

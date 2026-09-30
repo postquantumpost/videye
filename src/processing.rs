@@ -20,6 +20,7 @@ pub fn process_files(
     output: &str,
     video_output: Option<&str>,
     parallel_count: usize,
+    check_story_line_width: bool,
 ) -> Result<(), String> {
     let started_at = Instant::now();
     let message = match video_output {
@@ -83,6 +84,7 @@ pub fn process_files(
         frame_size,
         frame_rate_num,
         frame_rate_den,
+        check_story_line_width,
     };
     let mut history = History::new();
     loop {
@@ -180,6 +182,7 @@ fn process_frame_batch(
     let frame_size = state.frame_size;
     let frame_rate_num = state.frame_rate_num;
     let frame_rate_den = state.frame_rate_den;
+    let check_story_line_width = state.check_story_line_width;
     let first_frame_number = state.current_frame;
 
     thread::scope(|scope| {
@@ -196,6 +199,7 @@ fn process_frame_batch(
                         frame_size,
                         frame_rate_num,
                         frame_rate_den,
+                        check_story_line_width,
                     };
                     let mut log = Vec::new();
                     let mut history = History::new();
