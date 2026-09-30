@@ -159,10 +159,13 @@ pub fn process_files(
     } else {
         0.0
     };
-    println!(
+    let summary = format!(
         "Processed {} frames in {:.2} seconds ({:.2} FPS).",
         state.current_frame, elapsed_seconds, frames_per_second
     );
+    writeln!(output_file, "{summary}")
+        .map_err(|error| format!("failed to write processing summary to {output}: {error}"))?;
+    println!("{summary}");
 
     Ok(())
 }

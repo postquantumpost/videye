@@ -128,7 +128,6 @@ pub(crate) fn process_frame(
         state.frame_height,
         frame.len()
     )?;
-    writeln!(output_file, "{hours:02}:{minutes:02}:{seconds:02}")?;
 
     let symbols = find_diamond_symbols(state, frame);
     let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
@@ -730,6 +729,10 @@ fn find_location1_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<Location
 }
 
 fn find_story_crop(frame: &[u8], width: usize, height: usize) -> Option<BoundingBox> {
+    const TOP_LINE_Y_RATIO: f32 = 1604.0 / 2160.0;
+    const BOTTOM_LINE_Y_RATIO: f32 = 1716.0 / 2160.0;
+    const LINE_Y_TOLERANCE_RATIO: f32 = 0.02;
+
     let expected_len = width.checked_mul(height)?.checked_mul(4)?;
     if width == 0 || height == 0 || frame.len() < expected_len {
         return None;
@@ -794,11 +797,21 @@ fn find_story_crop(frame: &[u8], width: usize, height: usize) -> Option<Bounding
 
     let min_separation = (height.saturating_mul(25) / 1_000).max(4);
     let max_separation = (height.saturating_mul(12) / 100).max(min_separation + 1);
+    let line_y_tolerance = height as f32 * LINE_Y_TOLERANCE_RATIO;
+    let expected_top_line_y = height as f32 * TOP_LINE_Y_RATIO;
+    let expected_bottom_line_y = height as f32 * BOTTOM_LINE_Y_RATIO;
     let mut best_pair: Option<(StoryLine, StoryLine, usize)> = None;
     for first in 0..lines.len() {
         for second in first + 1..lines.len() {
             let top_line = lines[first];
             let bottom_line = lines[second];
+            let top_line_center = (top_line.top + top_line.bottom) as f32 / 2.0;
+            let bottom_line_center = (bottom_line.top + bottom_line.bottom) as f32 / 2.0;
+            if (top_line_center - expected_top_line_y).abs() > line_y_tolerance
+                || (bottom_line_center - expected_bottom_line_y).abs() > line_y_tolerance
+            {
+                continue;
+            }
             let separation = bottom_line.top.saturating_sub(top_line.bottom);
             if separation < min_separation || separation > max_separation {
                 continue;
@@ -1921,7 +1934,7 @@ mod tests {
         for pixel in frame.chunks_exact_mut(4) {
             pixel[3] = 255;
         }
-        for y in [220, 221, 250, 251] {
+        for y in [223, 224, 238, 239] {
             for x in 120..360 {
                 let gap = x % 43 < 5;
                 let intensity = if x % 31 < 13 {
@@ -1937,8 +1950,8 @@ mod tests {
         }
         let crop = find_story_crop(&frame, width, height).unwrap();
 
-        assert_eq!(crop.top, 222);
-        assert_eq!(crop.height, 28);
+        assert_eq!(crop.top, 225);
+        assert_eq!(crop.height, 13);
         assert!(crop.left < 120);
         assert!(crop.left + crop.width > 360);
     }
