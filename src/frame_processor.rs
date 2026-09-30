@@ -58,7 +58,7 @@ pub(crate) struct ProcessingState {
     pub(crate) frame_size: usize,
     pub(crate) frame_rate_num: u32,
     pub(crate) frame_rate_den: u32,
-    pub(crate) check_story_line_width: bool,
+    pub(crate) check_story_line_thickness: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -253,7 +253,7 @@ pub(crate) fn process_frame(
         frame,
         state.frame_width,
         state.frame_height,
-        state.check_story_line_width,
+        state.check_story_line_thickness,
     ) {
         writeln!(
             output_file,
@@ -303,16 +303,16 @@ fn horizontal_span_is_centered(left: usize, right: usize, width: usize) -> bool 
     width > 0 && right > left && left.saturating_add(right).abs_diff(width) <= width / 10
 }
 
-fn story_line_height_matches_ratio(line_height: usize, frame_height: usize) -> bool {
+fn story_line_thickness_matches_ratio(line_thickness: usize, frame_height: usize) -> bool {
     const REFERENCE_HEIGHT: u128 = 2_160;
-    const REFERENCE_LINE_HEIGHT: u128 = 8;
+    const REFERENCE_LINE_THICKNESS: u128 = 8;
 
-    if line_height == 0 || frame_height == 0 {
+    if line_thickness == 0 || frame_height == 0 {
         return false;
     }
-    let actual_scaled = line_height as u128 * REFERENCE_HEIGHT;
-    let expected_scaled = frame_height as u128 * REFERENCE_LINE_HEIGHT;
-    actual_scaled * 10 >= expected_scaled * 9 && actual_scaled * 10 <= expected_scaled * 11
+    let actual_scaled = line_thickness as u128 * REFERENCE_HEIGHT;
+    let expected_scaled = frame_height as u128 * REFERENCE_LINE_THICKNESS;
+    actual_scaled * 10 >= expected_scaled * 7 && actual_scaled * 10 <= expected_scaled * 13
 }
 
 fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, acttitle: String) {
@@ -846,11 +846,11 @@ fn find_story_crop(
             {
                 continue;
             }
-            let top_line_height = top_line.bottom - top_line.top + 1;
-            let bottom_line_height = bottom_line.bottom - bottom_line.top + 1;
+            let top_line_thickness = top_line.bottom - top_line.top + 1;
+            let bottom_line_thickness = bottom_line.bottom - bottom_line.top + 1;
             if check_line_width
-                && (!story_line_height_matches_ratio(top_line_height, height)
-                    || !story_line_height_matches_ratio(bottom_line_height, height))
+                && (!story_line_thickness_matches_ratio(top_line_thickness, height)
+                    || !story_line_thickness_matches_ratio(bottom_line_thickness, height))
             {
                 continue;
             }
@@ -1886,7 +1886,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
-            check_story_line_width: false,
+            check_story_line_thickness: false,
         };
 
         assert_eq!(
@@ -1925,7 +1925,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
-            check_story_line_width: false,
+            check_story_line_thickness: false,
         };
 
         assert_eq!(
@@ -1965,7 +1965,7 @@ mod tests {
             frame_size: frame.len(),
             frame_rate_num: 1,
             frame_rate_den: 1,
-            check_story_line_width: false,
+            check_story_line_thickness: false,
         };
 
         let symbols = find_location1_symbols(&state, &frame);
@@ -2033,15 +2033,17 @@ mod tests {
 
     #[test]
     fn story_line_thickness_scales_with_frame_height() {
-        assert!(super::story_line_height_matches_ratio(8, 2_160));
-        assert!(!super::story_line_height_matches_ratio(7, 2_160));
-        assert!(!super::story_line_height_matches_ratio(9, 2_160));
-        assert!(super::story_line_height_matches_ratio(1, 300));
-        assert!(!super::story_line_height_matches_ratio(2, 300));
+        assert!(super::story_line_thickness_matches_ratio(8, 2_160));
+        assert!(super::story_line_thickness_matches_ratio(6, 2_160));
+        assert!(super::story_line_thickness_matches_ratio(10, 2_160));
+        assert!(!super::story_line_thickness_matches_ratio(5, 2_160));
+        assert!(!super::story_line_thickness_matches_ratio(11, 2_160));
+        assert!(super::story_line_thickness_matches_ratio(1, 300));
+        assert!(!super::story_line_thickness_matches_ratio(2, 300));
     }
 
     #[test]
-    fn story_line_width_check_can_be_disabled() {
+    fn story_line_thickness_check_can_be_disabled() {
         let width = 480;
         let height = 300;
         let mut frame = vec![0; width * height * 4];
@@ -2199,7 +2201,7 @@ mod tests {
             frame_size: width * height * 4,
             frame_rate_num: 1,
             frame_rate_den: 1,
-            check_story_line_width: false,
+            check_story_line_thickness: false,
         };
 
         assert!(super::find_diamond_symbols(&state, &frame).is_empty());

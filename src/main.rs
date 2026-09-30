@@ -7,7 +7,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--check-story-line-width true|false]");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--check-story-line-thickness true|false]");
         process::exit(2);
     }
 }
@@ -18,7 +18,7 @@ fn run() -> Result<(), String> {
     let mut output = None;
     let mut video_output = None;
     let mut parallel_count = 4;
-    let mut check_story_line_width = false;
+    let mut check_story_line_thickness = true;
 
     while let Some(argument) = arguments.next() {
         let value = arguments
@@ -37,11 +37,11 @@ fn run() -> Result<(), String> {
                     return Err("parallel count must be greater than zero".to_string());
                 }
             }
-            "--check-story-line-width" => {
-                check_story_line_width = match value.as_str() {
+            "--check-story-line-thickness" => {
+                check_story_line_thickness = match value.as_str() {
                     "true" => true,
                     "false" => false,
-                    _ => return Err(format!("invalid story line width check: {value}")),
+                    _ => return Err(format!("invalid story line thickness check: {value}")),
                 }
             }
             _ => return Err(format!("unknown argument: {argument}")),
@@ -64,7 +64,7 @@ fn run() -> Result<(), String> {
             output,
             video_output.as_deref(),
             parallel_count,
-            check_story_line_width,
+            check_story_line_thickness,
         )?;
     }
 
