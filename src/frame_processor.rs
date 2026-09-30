@@ -491,9 +491,10 @@ pub(crate) fn write_history_single_line(
                 let hours = elapsed_seconds / 3_600;
                 let minutes = (elapsed_seconds / 60) % 60;
                 let seconds = elapsed_seconds % 60;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
                 writeln!(
                     output_file,
-                    "{hours}:{minutes}:{seconds} act: {}, {}",
+                    "{timestamp} act: {}, {}",
                     textact.actnumber, textact.acttitle
                 )?;
             }
@@ -502,9 +503,10 @@ pub(crate) fn write_history_single_line(
                 let hours = elapsed_seconds / 3_600;
                 let minutes = (elapsed_seconds / 60) % 60;
                 let seconds = elapsed_seconds % 60;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
                 writeln!(
                     output_file,
-                    "{hours}:{minutes}:{seconds} location2: {}",
+                    "{timestamp} location2: {}",
                     location2.location2
                 )?;
             }
@@ -513,9 +515,10 @@ pub(crate) fn write_history_single_line(
                 let hours = elapsed_seconds / 3_600;
                 let minutes = (elapsed_seconds / 60) % 60;
                 let seconds = elapsed_seconds % 60;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
                 writeln!(
                     output_file,
-                    "{hours}:{minutes}:{seconds} location1: {}",
+                    "{timestamp} location1: {}",
                     location1.location1
                 )?;
             }
@@ -524,26 +527,28 @@ pub(crate) fn write_history_single_line(
                 let hours = elapsed_seconds / 3_600;
                 let minutes = (elapsed_seconds / 60) % 60;
                 let seconds = elapsed_seconds % 60;
-                writeln!(
-                    output_file,
-                    "{hours}:{minutes}:{seconds} story: {}",
-                    story.text
-                )?;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                writeln!(output_file, "{timestamp} story: {}", story.text)?;
             }
             HistoryEntry::Combat1(combat1) => {
                 let elapsed_seconds = combat1.timestamp_ns / 1_000_000_000;
                 let hours = elapsed_seconds / 3_600;
                 let minutes = (elapsed_seconds / 60) % 60;
                 let seconds = elapsed_seconds % 60;
-                writeln!(
-                    output_file,
-                    "{hours}:{minutes}:{seconds} combat1: {}",
-                    combat1.text
-                )?;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                writeln!(output_file, "{timestamp} combat1: {}", combat1.text)?;
             }
         }
     }
     Ok(())
+}
+
+fn format_history_timestamp(hours: u128, minutes: u128, seconds: u128) -> String {
+    match (hours, minutes) {
+        (0, 0) => seconds.to_string(),
+        (0, minutes) => format!("{minutes}:{seconds:02}"),
+        (hours, minutes) => format!("{hours}:{minutes:02}:{seconds:02}"),
+    }
 }
 
 fn text_crop_between_symbols(
@@ -1705,7 +1710,13 @@ mod tests {
 
         write_history_single_line(&history, &mut output).unwrap();
 
-        assert_eq!(output, b"1:1:1 act: A12, Opening\n");
+        assert_eq!(output, b"1:01:01 act: A12, Opening\n");
+    }
+
+    #[test]
+    fn omits_zero_leading_timestamp_fields() {
+        assert_eq!(super::format_history_timestamp(0, 1, 2), "1:02");
+        assert_eq!(super::format_history_timestamp(0, 0, 2), "2");
     }
 
     #[test]
@@ -1720,7 +1731,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output).unwrap();
 
-        assert_eq!(output, b"0:0:2 location2: Loyal Friend's Grave\n");
+        assert_eq!(output, b"2 location2: Loyal Friend's Grave\n");
     }
 
     #[test]
@@ -1731,7 +1742,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output).unwrap();
 
-        assert_eq!(output, b"0:0:2 location1: Kin Prefecture\n");
+        assert_eq!(output, b"2 location1: Kin Prefecture\n");
     }
 
     #[test]
@@ -1742,7 +1753,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output).unwrap();
 
-        assert_eq!(output, b"0:0:2 story: From the darkness\n");
+        assert_eq!(output, b"2 story: From the darkness\n");
     }
 
     #[test]
@@ -1753,7 +1764,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output).unwrap();
 
-        assert_eq!(output, b"0:0:2 combat1: RYUZO\n");
+        assert_eq!(output, b"2 combat1: RYUZO\n");
     }
 
     #[test]
