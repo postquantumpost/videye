@@ -10,6 +10,8 @@ set -x
 #cargo run -- --in ../samples/gstoryv1.mp4 --out notes.txt --parallel-count 20
 #cargo run -- --in ../samples/ghost0.mp4 --out notes.txt --parallel-count 30
 #cargo run -- --in ../samples/story1.mp4 --out notes.txt --parallel-count 30
-f=/media/jph/slow_bad_3/2026/09/2026090218291302_ghost_80.mp4
-cargo run -- --in $f --out notes.txt --parallel-count 30
-cat notes.txt
+#f=/media/jph/slow_bad_3/2026/09/2026090218291302_ghost_80.mp4
+f=../samples/samp.mp4
+#cargo run -- --in $f --out notes.txt --parallel-count 16
+cargo run -- --in $f --out notes.txt --parallel-count 16 --use-tesseract-library true
+#cat notes.txt

@@ -7,7 +7,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--check-story-line-thickness true|false]");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--check-story-line-thickness true|false] [--use-tesseract-library true|false]");
         process::exit(2);
     }
 }
@@ -19,6 +19,7 @@ fn run() -> Result<(), String> {
     let mut video_output = None;
     let mut parallel_count = 30;
     let mut check_story_line_thickness = true;
+    let mut use_tesseract_library = false;
 
     while let Some(argument) = arguments.next() {
         let value = arguments
@@ -44,6 +45,13 @@ fn run() -> Result<(), String> {
                     _ => return Err(format!("invalid story line thickness check: {value}")),
                 }
             }
+            "--use-tesseract-library" => {
+                use_tesseract_library = match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(format!("invalid Tesseract library setting: {value}")),
+                }
+            }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
@@ -65,6 +73,7 @@ fn run() -> Result<(), String> {
             video_output.as_deref(),
             parallel_count,
             check_story_line_thickness,
+            use_tesseract_library,
         )?;
     }
 

@@ -1,5 +1,5 @@
 use crate::frame_processor::{
-    merge_history, process_frame, write_history, write_history_single_line, History,
+    merge_history, process_frame, write_history, write_history_single_line, History, OcrCache,
     ProcessingState,
 };
 use std::fs::File;
@@ -21,6 +21,7 @@ pub fn process_files(
     video_output: Option<&str>,
     parallel_count: usize,
     check_story_line_thickness: bool,
+    use_tesseract_library: bool,
 ) -> Result<(), String> {
     let started_at = Instant::now();
     let message = match video_output {
@@ -87,6 +88,7 @@ pub fn process_files(
         check_story_line_thickness,
     };
     let mut history = History::new();
+    let ocr_cache = OcrCache::default();
     loop {
         let mut frame_batch = Vec::with_capacity(parallel_count);
         for _ in 0..parallel_count {
@@ -113,7 +115,13 @@ pub fn process_files(
             break;
         }
 
-        let results = process_frame_batch(frame_batch, &state, video_output.is_some())?;
+        let results = process_frame_batch(
+            frame_batch,
+            &state,
+            video_output.is_some(),
+            use_tesseract_library,
+            &ocr_cache,
+        )?;
         for result in results {
             output_file
                 .write_all(&result.log)
@@ -176,6 +184,8 @@ fn process_frame_batch(
     frames: Vec<Vec<u8>>,
     state: &ProcessingState,
     annotate_frames: bool,
+    use_tesseract_library: bool,
+    ocr_cache: &OcrCache,
 ) -> Result<Vec<FrameProcessingResult>, String> {
     let frame_width = state.frame_width;
     let frame_height = state.frame_height;
@@ -208,6 +218,8 @@ fn process_frame_batch(
                         &frame,
                         &mut log,
                         annotate_frames,
+                        use_tesseract_library,
+                        ocr_cache,
                         &mut history,
                     )
                     .map_err(|error| {
