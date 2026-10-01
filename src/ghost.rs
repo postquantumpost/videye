@@ -410,7 +410,7 @@ pub(crate) fn find_combat1_crop(frame: &[u8], width: usize, height: usize) -> Op
     let search_right = width.saturating_mul(85) / 100;
     let min_line_width = (width.saturating_mul(20) / 100).max(8);
     let row_tolerance = (height / 500).max(1);
-    let gray_lines = find_combat_lines(
+    let (gray_lines, red_lines) = find_combat_lines(
         frame,
         width,
         height,
@@ -420,19 +420,6 @@ pub(crate) fn find_combat1_crop(frame: &[u8], width: usize, height: usize) -> Op
         search_right,
         min_line_width,
         row_tolerance,
-        false,
-    );
-    let red_lines = find_combat_lines(
-        frame,
-        width,
-        height,
-        search_top,
-        search_bottom,
-        search_left,
-        search_right,
-        min_line_width,
-        row_tolerance,
-        true,
     );
 
     let min_separation = (height.saturating_mul(4) / 1_000).max(2);
@@ -499,101 +486,139 @@ fn find_combat_lines(
     search_right: usize,
     min_line_width: usize,
     row_tolerance: usize,
-    red: bool,
-) -> Vec<CombatLine> {
-    let mut lines = Vec::new();
-    let mut current_line: Option<CombatLine> = None;
+) -> (Vec<CombatLine>, Vec<CombatLine>) {
+    let mut gray_lines = Vec::new();
+    let mut red_lines = Vec::new();
+    let mut current_gray_line = None;
+    let mut current_red_line = None;
 
     for y in search_top..search_bottom.min(height) {
-        let run = strongest_combat_run(
-            frame,
-            width,
+        let (gray_run, red_run) =
+            strongest_combat_runs(frame, width, y, search_left, search_right, min_line_width);
+        update_combat_lines(
+            &mut gray_lines,
+            &mut current_gray_line,
             y,
-            search_left,
-            search_right,
-            min_line_width,
-            red,
+            row_tolerance,
+            gray_run,
         );
-        let Some((left, right, support)) = run else {
-            if let Some(line) = current_line.take() {
-                lines.push(line);
-            }
-            continue;
-        };
+        update_combat_lines(
+            &mut red_lines,
+            &mut current_red_line,
+            y,
+            row_tolerance,
+            red_run,
+        );
+    }
+    if let Some(line) = current_gray_line {
+        gray_lines.push(line);
+    }
+    if let Some(line) = current_red_line {
+        red_lines.push(line);
+    }
+    (gray_lines, red_lines)
+}
 
-        match &mut current_line {
-            Some(line) if y <= line.bottom.saturating_add(row_tolerance) => {
-                line.bottom = y;
-                line.left = line.left.min(left);
-                line.right = line.right.max(right);
-                line.support = line.support.max(support);
-            }
-            Some(_) => {
-                lines.push(
-                    current_line
-                        .replace(CombatLine {
-                            top: y,
-                            bottom: y,
-                            left,
-                            right,
-                            support,
-                        })
-                        .expect("current combat line is present"),
-                );
-            }
-            None => {
-                current_line = Some(CombatLine {
-                    top: y,
-                    bottom: y,
-                    left,
-                    right,
-                    support,
-                });
+fn update_combat_lines(
+    lines: &mut Vec<CombatLine>,
+    current_line: &mut Option<CombatLine>,
+    y: usize,
+    row_tolerance: usize,
+    run: Option<(usize, usize, usize)>,
+) {
+    let Some((left, right, support)) = run else {
+        if let Some(line) = current_line.take() {
+            lines.push(line);
+        }
+        return;
+    };
+
+    let line = CombatLine {
+        top: y,
+        bottom: y,
+        left,
+        right,
+        support,
+    };
+    match current_line {
+        Some(current) if y <= current.bottom.saturating_add(row_tolerance) => {
+            current.bottom = y;
+            current.left = current.left.min(left);
+            current.right = current.right.max(right);
+            current.support = current.support.max(support);
+        }
+        _ => {
+            if let Some(previous) = current_line.replace(line) {
+                lines.push(previous);
             }
         }
     }
-    if let Some(line) = current_line {
-        lines.push(line);
-    }
-    lines
 }
 
-fn strongest_combat_run(
+#[derive(Default)]
+struct CombatRun {
+    start: Option<usize>,
+    last_support: usize,
+    support: usize,
+    best: Option<(usize, usize, usize)>,
+}
+
+impl CombatRun {
+    fn observe(&mut self, x: usize, matches: bool, min_line_width: usize) {
+        if matches {
+            if self.start.is_none() {
+                self.start = Some(x);
+            }
+            self.last_support = x;
+            self.support += 1;
+        } else if self.start.is_some() && x.saturating_sub(self.last_support) > 2 {
+            if let Some(start) = self.start.take() {
+                update_combat_run(
+                    &mut self.best,
+                    start,
+                    self.last_support,
+                    self.support,
+                    min_line_width,
+                );
+            }
+            self.support = 0;
+        }
+    }
+
+    fn finish(mut self, min_line_width: usize) -> Option<(usize, usize, usize)> {
+        if let Some(start) = self.start {
+            update_combat_run(
+                &mut self.best,
+                start,
+                self.last_support,
+                self.support,
+                min_line_width,
+            );
+        }
+        self.best
+    }
+}
+
+fn strongest_combat_runs(
     frame: &[u8],
     width: usize,
     y: usize,
     search_left: usize,
     search_right: usize,
     min_line_width: usize,
-    red: bool,
-) -> Option<(usize, usize, usize)> {
-    let mut run_start = None;
-    let mut last_support = 0;
-    let mut support = 0;
-    let mut best = None;
+) -> (Option<(usize, usize, usize)>, Option<(usize, usize, usize)>) {
+    let mut gray_run = CombatRun::default();
+    let mut red_run = CombatRun::default();
 
     for x in search_left..search_right.min(width) {
-        if is_combat_line_pixel(frame, width, x, y, red) {
-            if run_start.is_none() {
-                run_start = Some(x);
-            }
-            last_support = x;
-            support += 1;
-        } else if run_start.is_some() && x.saturating_sub(last_support) > 2 {
-            update_combat_run(
-                &mut best,
-                run_start.take()?,
-                last_support,
-                support,
-                min_line_width,
-            );
-            support = 0;
-        }
+        let (is_gray, is_red) = combat_line_pixel_classes(frame, width, x, y);
+        gray_run.observe(x, is_gray, min_line_width);
+        red_run.observe(x, is_red, min_line_width);
     }
-    if let Some(run_start) = run_start {
-        update_combat_run(&mut best, run_start, last_support, support, min_line_width);
-    }
-    best
+    (
+        gray_run.finish(min_line_width),
+        red_run.finish(min_line_width),
+    )
 }
 
 fn update_combat_run(
@@ -611,22 +636,20 @@ fn update_combat_run(
     }
 }
 
-fn is_combat_line_pixel(frame: &[u8], width: usize, x: usize, y: usize, red: bool) -> bool {
+fn combat_line_pixel_classes(frame: &[u8], width: usize, x: usize, y: usize) -> (bool, bool) {
     let pixel = (y * width + x) * 4;
     let red_value = u16::from(frame[pixel]);
     let green = u16::from(frame[pixel + 1]);
     let blue = u16::from(frame[pixel + 2]);
-    if red {
-        red_value >= 150
-            && red_value > green.saturating_mul(3) / 2
-            && red_value > blue.saturating_mul(3) / 2
-            && green < 130
-            && blue < 130
-    } else {
-        let minimum = red_value.min(green).min(blue);
-        let maximum = red_value.max(green).max(blue);
-        minimum >= 70 && maximum <= 220 && maximum - minimum <= 35
-    }
+    let is_red = red_value >= 150
+        && red_value > green.saturating_mul(3) / 2
+        && red_value > blue.saturating_mul(3) / 2
+        && green < 130
+        && blue < 130;
+    let minimum = red_value.min(green).min(blue);
+    let maximum = red_value.max(green).max(blue);
+    let is_gray = minimum >= 70 && maximum <= 220 && maximum - minimum <= 35;
+    (is_gray, is_red)
 }
 
 fn strongest_story_run(

@@ -2,6 +2,7 @@ use crate::frame_processor::{
     merge_history, process_frame, write_history, write_history_single_line, DetectorPriority,
     History, ProcessingState,
 };
+use crate::ghost::DetectorScratch;
 use crate::ocr_support::{OcrCache, OcrSession};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -120,6 +121,7 @@ pub fn process_files(
             let check_story_line_thickness = state.check_story_line_thickness;
             worker_handles.push(scope.spawn(move || {
                 let mut ocr_session = OcrSession::new(use_tesseract_library, cache);
+                let mut detector_scratch = DetectorScratch::default();
                 loop {
                     let job = job_receiver
                         .lock()
@@ -149,6 +151,7 @@ pub fn process_files(
                             &mut log,
                             video_output.is_some(),
                             &mut ocr_session,
+                            &mut detector_scratch,
                             detector_priority,
                             &mut history,
                         )

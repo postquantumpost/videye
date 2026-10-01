@@ -114,6 +114,7 @@ pub(crate) fn process_frame(
     output_file: &mut impl Write,
     annotate_frame: bool,
     ocr_session: &mut OcrSession<'_>,
+    detector_scratch: &mut DetectorScratch,
     detector_priority: &DetectorPriority,
     history: &mut History,
 ) -> io::Result<Option<Vec<u8>>> {
@@ -124,7 +125,6 @@ pub(crate) fn process_frame(
     let minutes = (elapsed_seconds / 60) % 60;
     let seconds = elapsed_seconds % 60;
     let nanoseconds = elapsed_ns % 1_000_000_000;
-    let mut detector_scratch = DetectorScratch::default();
     writeln!(
         output_file,
         "Frame {} at {:02}:{:02}:{:02}.{:09}: {}x{} ({} RGBA bytes)",
@@ -149,7 +149,7 @@ pub(crate) fn process_frame(
                 ocr_session,
                 history,
                 elapsed_ns,
-                &mut detector_scratch,
+                detector_scratch,
             )?,
             Detector::Location2 => process_location2_detector(
                 state,
@@ -159,7 +159,7 @@ pub(crate) fn process_frame(
                 ocr_session,
                 history,
                 elapsed_ns,
-                &mut detector_scratch,
+                detector_scratch,
             )?,
             Detector::Location1 => process_location1_detector(
                 state,
@@ -169,7 +169,7 @@ pub(crate) fn process_frame(
                 ocr_session,
                 history,
                 elapsed_ns,
-                &mut detector_scratch,
+                detector_scratch,
             )?,
             Detector::Story => process_story_detector(
                 state,
