@@ -2,6 +2,7 @@ use std::env;
 use std::process;
 
 mod frame_processor;
+mod ghost;
 mod processing;
 
 fn main() {
