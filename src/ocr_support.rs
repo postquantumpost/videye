@@ -151,13 +151,21 @@ impl<'cache> OcrSession<'cache> {
                 self.cache,
             ),
             frame_number,
+            crop,
         )
     }
 }
 
-fn ocr_result_or_empty(result: io::Result<String>, frame_number: u64) -> String {
+fn ocr_result_or_empty(
+    result: io::Result<String>,
+    frame_number: u64,
+    crop: &BoundingBox,
+) -> String {
     result.unwrap_or_else(|error| {
-        eprintln!("OCR failed on frame {frame_number}: {error}");
+        eprintln!(
+            "OCR failed on frame {frame_number} crop x={} y={} width={} height={}: {error}",
+            crop.left, crop.top, crop.width, crop.height
+        );
         String::new()
     })
 }
@@ -308,16 +316,6 @@ fn recognize_text_with_library(
     }
 }
 
-fn crop_rgba_to_rgb(
-    frame: &[u8],
-    frame_width: usize,
-    frame_height: usize,
-    crop: &BoundingBox,
-) -> io::Result<Vec<u8>> {
-    let (crop_right, crop_bottom) = validate_rgba_crop(frame, frame_width, frame_height, crop)?;
-    crop_rgba_to_rgb_with_bounds(frame, frame_width, crop, crop_right, crop_bottom)
-}
-
 fn validate_rgba_crop(
     frame: &[u8],
     frame_width: usize,
@@ -376,8 +374,9 @@ fn crop_rgba_to_rgb_with_bounds(
 #[cfg(test)]
 mod tests {
     use super::{
-        crop_is_large_enough, crop_rgba_to_rgb, ocr_cache_key_rgba, ocr_result_or_empty,
-        recognize_text_inner, OcrBackend, OcrCache, OcrSession, MAX_OCR_CACHE_ENTRIES,
+        crop_is_large_enough, crop_rgba_to_rgb_with_bounds, ocr_cache_key_rgba,
+        ocr_result_or_empty, recognize_text_inner, validate_rgba_crop, OcrBackend, OcrCache,
+        OcrSession, MAX_OCR_CACHE_ENTRIES,
     };
     use crate::frame_processor::BoundingBox;
 
@@ -437,7 +436,9 @@ mod tests {
             width,
             height,
         };
-        let rgb_crop = crop_rgba_to_rgb(&frame, width, height, &crop).unwrap();
+        let (crop_right, crop_bottom) = validate_rgba_crop(&frame, width, height, &crop).unwrap();
+        let rgb_crop =
+            crop_rgba_to_rgb_with_bounds(&frame, width, &crop, crop_right, crop_bottom).unwrap();
         let key = ocr_cache_key_rgba(&frame, width, &crop, height);
         let cache = OcrCache::default();
         cache.insert(width, height, key, rgb_crop, "cached".to_string());
@@ -492,9 +493,10 @@ mod tests {
             width: 2,
             height: 2,
         };
+        let (crop_right, crop_bottom) = validate_rgba_crop(&frame, 3, 2, &crop).unwrap();
 
         assert_eq!(
-            crop_rgba_to_rgb(&frame, 3, 2, &crop).unwrap(),
+            crop_rgba_to_rgb_with_bounds(&frame, 3, &crop, crop_right, crop_bottom).unwrap(),
             vec![4, 5, 6, 8, 9, 10, 16, 17, 18, 20, 21, 22]
         );
     }
@@ -507,6 +509,12 @@ mod tests {
                 "simulated Tesseract failure",
             )),
             7,
+            &BoundingBox {
+                left: 10,
+                top: 20,
+                width: 30,
+                height: 40,
+            },
         );
 
         assert!(text.is_empty());

@@ -6,6 +6,7 @@ use crate::ghost::{
 use crate::ocr_support::OcrSession;
 use std::fs::File;
 use std::io::{self, Write};
+use std::sync::Mutex;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BoundingBox {
@@ -67,12 +68,53 @@ pub(crate) enum HistoryEntry {
 
 pub(crate) type History = Vec<HistoryEntry>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Detector {
+    Act,
+    Location2,
+    Location1,
+    Story,
+    Combat1,
+}
+
+pub(crate) struct DetectorPriority {
+    order: Mutex<[Detector; 5]>,
+}
+
+impl Default for DetectorPriority {
+    fn default() -> Self {
+        Self {
+            order: Mutex::new([
+                Detector::Act,
+                Detector::Location2,
+                Detector::Location1,
+                Detector::Story,
+                Detector::Combat1,
+            ]),
+        }
+    }
+}
+
+impl DetectorPriority {
+    fn order(&self) -> [Detector; 5] {
+        *self.order.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn promote(&self, detector: Detector) {
+        let mut order = self.order.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(index) = order.iter().position(|candidate| *candidate == detector) {
+            order[..=index].rotate_right(1);
+        }
+    }
+}
+
 pub(crate) fn process_frame(
     state: &mut ProcessingState,
     frame: &[u8],
     output_file: &mut impl Write,
     annotate_frame: bool,
     ocr_session: &mut OcrSession<'_>,
+    detector_priority: &DetectorPriority,
     history: &mut History,
 ) -> io::Result<Option<Vec<u8>>> {
     state.current_frame += 1;
@@ -96,10 +138,93 @@ pub(crate) fn process_frame(
         frame.len()
     )?;
 
-    let symbols = find_diamond_symbols(state, frame, &mut detector_scratch);
     let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
+    for detector in detector_priority.order() {
+        let matched = match detector {
+            Detector::Act => process_act_detector(
+                state,
+                frame,
+                output_file,
+                &mut annotated_frame,
+                ocr_session,
+                history,
+                elapsed_ns,
+                &mut detector_scratch,
+            )?,
+            Detector::Location2 => process_location2_detector(
+                state,
+                frame,
+                output_file,
+                &mut annotated_frame,
+                ocr_session,
+                history,
+                elapsed_ns,
+                &mut detector_scratch,
+            )?,
+            Detector::Location1 => process_location1_detector(
+                state,
+                frame,
+                output_file,
+                &mut annotated_frame,
+                ocr_session,
+                history,
+                elapsed_ns,
+                &mut detector_scratch,
+            )?,
+            Detector::Story => process_story_detector(
+                state,
+                frame,
+                output_file,
+                &mut annotated_frame,
+                ocr_session,
+                history,
+                elapsed_ns,
+            )?,
+            Detector::Combat1 => process_combat1_detector(
+                state,
+                frame,
+                output_file,
+                &mut annotated_frame,
+                ocr_session,
+                history,
+                elapsed_ns,
+            )?,
+        };
+        if matched {
+            detector_priority.promote(detector);
+            break;
+        }
+    }
+    Ok(annotated_frame)
+}
+
+fn process_act_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+    scratch: &mut DetectorScratch,
+) -> io::Result<bool> {
+    let symbols = find_diamond_symbols(state, frame, scratch);
+    let pairs = symbols
+        .windows(2)
+        .filter(|pair| {
+            horizontal_span_is_centered(
+                pair[0].left,
+                pair[1].left.saturating_add(pair[1].width),
+                state.frame_width,
+            )
+        })
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return Ok(false);
+    }
+
     for symbol in &symbols {
-        if let Some(annotated_frame) = &mut annotated_frame {
+        if let Some(annotated_frame) = annotated_frame {
             draw_bounding_box(annotated_frame, state.frame_width, symbol);
         }
         writeln!(
@@ -108,14 +233,7 @@ pub(crate) fn process_frame(
             symbol.left, symbol.top, symbol.width, symbol.height
         )?;
     }
-    for pair in symbols.windows(2) {
-        if !horizontal_span_is_centered(
-            pair[0].left,
-            pair[1].left.saturating_add(pair[1].width),
-            state.frame_width,
-        ) {
-            continue;
-        }
+    for pair in pairs {
         let mut actnumber = None;
         let mut acttitle = None;
         if let Some(crop) =
@@ -150,10 +268,32 @@ pub(crate) fn process_frame(
             add_textact(history, elapsed_ns, actnumber, acttitle);
         }
     }
+    Ok(true)
+}
 
-    let location_symbols = find_location_symbols(state, frame, &mut detector_scratch);
-    for symbol in &location_symbols {
-        if let Some(annotated_frame) = &mut annotated_frame {
+fn process_location2_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+    scratch: &mut DetectorScratch,
+) -> io::Result<bool> {
+    let symbols = find_location_symbols(state, frame, scratch);
+    let crops = symbols
+        .windows(2)
+        .filter_map(|pair| {
+            text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
+        })
+        .collect::<Vec<_>>();
+    if crops.is_empty() {
+        return Ok(false);
+    }
+
+    for symbol in &symbols {
+        if let Some(annotated_frame) = annotated_frame {
             draw_bounding_box(annotated_frame, state.frame_width, symbol);
         }
         writeln!(
@@ -162,27 +302,51 @@ pub(crate) fn process_frame(
             symbol.left, symbol.top, symbol.width, symbol.height
         )?;
     }
-    for pair in location_symbols.windows(2) {
-        if let Some(crop) =
-            text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
-        {
-            let location2 = ocr_session.recognize(
-                frame,
-                state.frame_width,
-                state.frame_height,
-                &crop,
-                state.current_frame,
-            );
-            let location2 = location2.trim();
-            if !location2.is_empty() {
-                add_location2(history, elapsed_ns, location2.to_string());
-            }
+    for crop in crops {
+        let location2 = ocr_session.recognize(
+            frame,
+            state.frame_width,
+            state.frame_height,
+            &crop,
+            state.current_frame,
+        );
+        let location2 = location2.trim();
+        if !location2.is_empty() {
+            add_location2(history, elapsed_ns, location2.to_string());
         }
     }
+    Ok(true)
+}
 
-    let location1_symbols = find_location1_symbols(state, frame, &mut detector_scratch);
-    for symbol in &location1_symbols {
-        if let Some(annotated_frame) = &mut annotated_frame {
+fn process_location1_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+    scratch: &mut DetectorScratch,
+) -> io::Result<bool> {
+    let symbols = find_location1_symbols(state, frame, scratch);
+    let crops = symbols
+        .windows(2)
+        .filter(|pair| pair[0].side == Location1Side::Left && pair[1].side == Location1Side::Right)
+        .filter_map(|pair| {
+            text_crop_between_symbols(
+                &pair[0].bounds,
+                &pair[1].bounds,
+                state.frame_width,
+                state.frame_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    if crops.is_empty() {
+        return Ok(false);
+    }
+
+    for symbol in &symbols {
+        if let Some(annotated_frame) = annotated_frame {
             draw_bounding_box(annotated_frame, state.frame_width, &symbol.bounds);
         }
         writeln!(
@@ -191,73 +355,87 @@ pub(crate) fn process_frame(
             symbol.bounds.left, symbol.bounds.top, symbol.bounds.width, symbol.bounds.height
         )?;
     }
-    for pair in location1_symbols.windows(2) {
-        if pair[0].side != Location1Side::Left || pair[1].side != Location1Side::Right {
-            continue;
-        }
-        if let Some(crop) = text_crop_between_symbols(
-            &pair[0].bounds,
-            &pair[1].bounds,
+    for crop in crops {
+        let location1 = ocr_session.recognize(
+            frame,
             state.frame_width,
             state.frame_height,
-        ) {
-            let location1 = ocr_session.recognize(
-                frame,
-                state.frame_width,
-                state.frame_height,
-                &crop,
-                state.current_frame,
-            );
-            let location1 = location1.trim();
-            if !location1.is_empty() {
-                add_location1(history, elapsed_ns, location1.to_string());
-            }
+            &crop,
+            state.current_frame,
+        );
+        let location1 = location1.trim();
+        if !location1.is_empty() {
+            add_location1(history, elapsed_ns, location1.to_string());
         }
     }
+    Ok(true)
+}
 
-    if let Some(crop) = find_story_crop(
+fn process_story_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    _annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let Some(crop) = find_story_crop(
         frame,
         state.frame_width,
         state.frame_height,
         state.check_story_line_thickness,
-    ) {
-        writeln!(
-            output_file,
-            "Story panel: x={} y={} width={} height={}",
-            crop.left, crop.top, crop.width, crop.height
-        )?;
-        let story = ocr_session.recognize(
-            frame,
-            state.frame_width,
-            state.frame_height,
-            &crop,
-            state.current_frame,
-        );
-        let story = story.trim();
-        if !story.is_empty() {
-            add_story(history, elapsed_ns, story.to_string());
-        }
+    ) else {
+        return Ok(false);
+    };
+    writeln!(
+        output_file,
+        "Story panel: x={} y={} width={} height={}",
+        crop.left, crop.top, crop.width, crop.height
+    )?;
+    let story = ocr_session.recognize(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &crop,
+        state.current_frame,
+    );
+    let story = story.trim();
+    if !story.is_empty() {
+        add_story(history, elapsed_ns, story.to_string());
     }
+    Ok(true)
+}
 
-    if let Some(crop) = find_combat1_crop(frame, state.frame_width, state.frame_height) {
-        writeln!(
-            output_file,
-            "Combat1 lines: x={} y={} width={} height={}",
-            crop.left, crop.top, crop.width, crop.height
-        )?;
-        let text = ocr_session.recognize(
-            frame,
-            state.frame_width,
-            state.frame_height,
-            &crop,
-            state.current_frame,
-        );
-        let text = text.trim();
-        if !text.is_empty() {
-            add_combat1(history, elapsed_ns, text.to_string());
-        }
+fn process_combat1_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    _annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let Some(crop) = find_combat1_crop(frame, state.frame_width, state.frame_height) else {
+        return Ok(false);
+    };
+    writeln!(
+        output_file,
+        "Combat1 lines: x={} y={} width={} height={}",
+        crop.left, crop.top, crop.width, crop.height
+    )?;
+    let text = ocr_session.recognize(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &crop,
+        state.current_frame,
+    );
+    let text = text.trim();
+    if !text.is_empty() {
+        add_combat1(history, elapsed_ns, text.to_string());
     }
-    Ok(annotated_frame)
+    Ok(true)
 }
 
 fn frame_timestamp_ns(state: &ProcessingState) -> u128 {
@@ -553,8 +731,37 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 mod tests {
     use super::{
         add_combat1, add_location1, add_location2, add_story, add_textact,
-        write_history_single_line, BoundingBox, HistoryEntry,
+        write_history_single_line, BoundingBox, Detector, DetectorPriority, HistoryEntry,
     };
+
+    #[test]
+    fn moves_detected_detector_to_front_and_preserves_remaining_order() {
+        let priority = DetectorPriority::default();
+
+        priority.promote(Detector::Story);
+        assert_eq!(
+            priority.order(),
+            [
+                Detector::Story,
+                Detector::Act,
+                Detector::Location2,
+                Detector::Location1,
+                Detector::Combat1,
+            ]
+        );
+
+        priority.promote(Detector::Location2);
+        assert_eq!(
+            priority.order(),
+            [
+                Detector::Location2,
+                Detector::Story,
+                Detector::Act,
+                Detector::Location1,
+                Detector::Combat1,
+            ]
+        );
+    }
 
     #[test]
     fn writes_history_entries_on_single_lines() {
