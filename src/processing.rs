@@ -1,7 +1,8 @@
 use crate::frame_processor::{
-    merge_history, process_frame, write_history, write_history_single_line, History, OcrCache,
+    merge_history, process_frame, write_history, write_history_single_line, History,
     ProcessingState,
 };
+use crate::ocr_support::OcrCache;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;

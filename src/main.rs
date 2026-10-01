@@ -3,6 +3,7 @@ use std::process;
 
 mod frame_processor;
 mod ghost;
+mod ocr_support;
 mod processing;
 
 fn main() {
