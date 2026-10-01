@@ -102,7 +102,7 @@ pub fn process_files(
         let (job_sender, job_receiver) = mpsc::sync_channel::<FrameJob>(parallel_count);
         let job_receiver = Arc::new(Mutex::new(job_receiver));
         let (result_sender, result_receiver) =
-            mpsc::channel::<(u64, Result<FrameProcessingResult, String>)>();
+            mpsc::channel::<(u64, Vec<u8>, Result<FrameProcessingResult, String>)>();
         let mut worker_handles = Vec::with_capacity(parallel_count);
         for _ in 0..parallel_count {
             let job_receiver = Arc::clone(&job_receiver);
@@ -126,6 +126,7 @@ pub fn process_files(
                         break;
                     };
                     let current_frame = job.current_frame;
+                    let frame = job.frame;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut frame_state = ProcessingState {
                             current_frame,
@@ -140,7 +141,7 @@ pub fn process_files(
                         let mut history = History::new();
                         process_frame(
                             &mut frame_state,
-                            &job.frame,
+                            &frame,
                             &mut log,
                             video_output.is_some(),
                             &mut ocr_session,
@@ -166,7 +167,7 @@ pub fn process_files(
                         ))
                     });
                     let failed = result.is_err();
-                    if result_sender.send((current_frame, result)).is_err() || failed {
+                    if result_sender.send((current_frame, frame, result)).is_err() || failed {
                         break;
                     }
                 }
@@ -176,13 +177,16 @@ pub fn process_files(
 
         let processing_result = (|| {
             let mut pending_results = BTreeMap::new();
+            let mut available_frame_buffers = Vec::with_capacity(parallel_count);
             let mut next_frame_number = state.current_frame;
             let mut end_of_stream = false;
             loop {
                 while !end_of_stream
                     && next_frame_number.saturating_sub(state.current_frame) < parallel_count as u64
                 {
-                    let mut frame = vec![0; state.frame_size];
+                    let mut frame = available_frame_buffers
+                        .pop()
+                        .unwrap_or_else(|| vec![0; state.frame_size]);
                     let mut bytes_read = 0;
                     while bytes_read < state.frame_size {
                         match frames.read(&mut frame[bytes_read..]) {
@@ -215,9 +219,10 @@ pub fn process_files(
                     break;
                 }
 
-                let (frame_number, result) = result_receiver
+                let (frame_number, frame, result) = result_receiver
                     .recv()
                     .map_err(|_| "frame processing workers stopped unexpectedly".to_string())?;
+                available_frame_buffers.push(frame);
                 pending_results.insert(frame_number, result);
                 while let Some(result) = pending_results.remove(&state.current_frame) {
                     let result = result?;
