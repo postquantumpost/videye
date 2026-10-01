@@ -9,6 +9,12 @@ struct Component {
     pixels: Option<Vec<(usize, usize)>>,
 }
 
+#[derive(Default)]
+pub(crate) struct DetectorScratch {
+    visited: Vec<bool>,
+    pending: Vec<(usize, usize)>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Location1Side {
     Left,
@@ -139,18 +145,27 @@ fn similar_symbol_sizes(left: &BoundingBox, right: &BoundingBox) -> bool {
         && left.height.max(right.height) as f32 / height_min as f32 <= 1.25
 }
 
-pub(crate) fn find_diamond_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBox> {
-    find_diamond_symbols_in_band(state, frame, state.frame_height / 2, is_dark_pixel)
+pub(crate) fn find_diamond_symbols(
+    state: &ProcessingState,
+    frame: &[u8],
+    scratch: &mut DetectorScratch,
+) -> Vec<BoundingBox> {
+    find_diamond_symbols_in_band(state, frame, state.frame_height / 2, is_dark_pixel, scratch)
 }
 
-pub(crate) fn find_location_symbols(state: &ProcessingState, frame: &[u8]) -> Vec<BoundingBox> {
+pub(crate) fn find_location_symbols(
+    state: &ProcessingState,
+    frame: &[u8],
+    scratch: &mut DetectorScratch,
+) -> Vec<BoundingBox> {
     let center_y = state.frame_height.saturating_mul(24) / 100;
-    find_diamond_symbols_in_band(state, frame, center_y, is_bright_pixel)
+    find_diamond_symbols_in_band(state, frame, center_y, is_bright_pixel, scratch)
 }
 
 pub(crate) fn find_location1_symbols(
     state: &ProcessingState,
     frame: &[u8],
+    scratch: &mut DetectorScratch,
 ) -> Vec<Location1Symbol> {
     let width = state.frame_width;
     let height = state.frame_height;
@@ -173,7 +188,9 @@ pub(crate) fn find_location1_symbols(
     let Some(band_size) = width.checked_mul(band_height) else {
         return Vec::new();
     };
-    let mut visited = vec![false; band_size];
+    let DetectorScratch { visited, pending } = scratch;
+    visited.resize(band_size, false);
+    visited.fill(false);
     let max_component_dimension = ((height as f32 * 0.025).ceil() as usize).max(5);
     let mut components = Vec::new();
 
@@ -193,7 +210,8 @@ pub(crate) fn find_location1_symbols(
                 y,
                 max_component_dimension.saturating_mul(max_component_dimension),
                 is_location1_pixel,
-                &mut visited,
+                visited,
+                pending,
             );
             let component_width = component.max_x - component.min_x + 1;
             let component_height = component.max_y - component.min_y + 1;
@@ -786,6 +804,7 @@ fn find_diamond_symbols_in_band(
     frame: &[u8],
     center_y: usize,
     is_target_pixel: fn(&[u8], usize, usize, usize) -> bool,
+    scratch: &mut DetectorScratch,
 ) -> Vec<BoundingBox> {
     let width = state.frame_width;
     let height = state.frame_height;
@@ -807,7 +826,9 @@ fn find_diamond_symbols_in_band(
     let Some(band_size) = width.checked_mul(band_height) else {
         return Vec::new();
     };
-    let mut visited = vec![false; band_size];
+    let DetectorScratch { visited, pending } = scratch;
+    visited.resize(band_size, false);
+    visited.fill(false);
     let max_component_dimension = ((height as f32 * 0.025).ceil() as usize).max(5);
     let mut components = Vec::new();
 
@@ -827,7 +848,8 @@ fn find_diamond_symbols_in_band(
                 y,
                 max_component_dimension.saturating_mul(max_component_dimension),
                 is_target_pixel,
-                &mut visited,
+                visited,
+                pending,
             );
             let component_width = component.max_x - component.min_x + 1;
             let component_height = component.max_y - component.min_y + 1;
@@ -912,8 +934,10 @@ fn collect_component(
     max_stored_pixels: usize,
     is_target_pixel: fn(&[u8], usize, usize, usize) -> bool,
     visited: &mut [bool],
+    pending: &mut Vec<(usize, usize)>,
 ) -> Component {
-    let mut pending = vec![(start_x, start_y)];
+    pending.clear();
+    pending.push((start_x, start_y));
     let start_index = (start_y - first_y) * width + start_x;
     visited[start_index] = true;
     let mut component = Component {
@@ -1130,9 +1154,10 @@ mod tests {
             frame_rate_den: 1,
             check_story_line_thickness: false,
         };
+        let mut scratch = DetectorScratch::default();
 
         assert_eq!(
-            find_diamond_symbols(&state, &frame),
+            find_diamond_symbols(&state, &frame, &mut scratch),
             vec![
                 BoundingBox {
                     left: 114,
@@ -1169,9 +1194,10 @@ mod tests {
             frame_rate_den: 1,
             check_story_line_thickness: false,
         };
+        let mut scratch = DetectorScratch::default();
 
         assert_eq!(
-            find_location_symbols(&state, &frame),
+            find_location_symbols(&state, &frame, &mut scratch),
             vec![
                 BoundingBox {
                     left: 114,
@@ -1209,14 +1235,41 @@ mod tests {
             frame_rate_den: 1,
             check_story_line_thickness: false,
         };
+        let mut scratch = DetectorScratch::default();
 
-        let symbols = find_location1_symbols(&state, &frame);
+        let symbols = find_location1_symbols(&state, &frame, &mut scratch);
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].side, Location1Side::Left);
         assert_eq!(symbols[1].side, Location1Side::Right);
         assert!(symbols
             .iter()
             .all(|symbol| symbol.bounds.height > symbol.bounds.width));
+    }
+
+    #[test]
+    fn reuses_visited_storage_between_symbol_scans() {
+        let width = 480;
+        let height = 300;
+        let frame = vec![255; width * height * 4];
+        let state = ProcessingState {
+            current_frame: 0,
+            frame_width: width,
+            frame_height: height,
+            frame_size: frame.len(),
+            frame_rate_num: 1,
+            frame_rate_den: 1,
+            check_story_line_thickness: false,
+        };
+        let mut scratch = DetectorScratch::default();
+
+        find_diamond_symbols(&state, &frame, &mut scratch);
+        find_location_symbols(&state, &frame, &mut scratch);
+        let visited_pointer = scratch.visited.as_ptr();
+        let visited_capacity = scratch.visited.capacity();
+        find_location1_symbols(&state, &frame, &mut scratch);
+
+        assert_eq!(scratch.visited.as_ptr(), visited_pointer);
+        assert_eq!(scratch.visited.capacity(), visited_capacity);
     }
 
     #[test]
@@ -1344,7 +1397,8 @@ mod tests {
             check_story_line_thickness: false,
         };
 
-        assert!(super::find_diamond_symbols(&state, &frame).is_empty());
+        let mut scratch = super::DetectorScratch::default();
+        assert!(super::find_diamond_symbols(&state, &frame, &mut scratch).is_empty());
     }
 
     #[test]

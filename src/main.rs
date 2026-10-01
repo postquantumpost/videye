@@ -21,7 +21,7 @@ fn run() -> Result<(), String> {
     let mut video_output = None;
     let mut parallel_count = 30;
     let mut check_story_line_thickness = true;
-    let mut use_tesseract_library = false;
+    let mut use_tesseract_library = true;
 
     while let Some(argument) = arguments.next() {
         let value = arguments

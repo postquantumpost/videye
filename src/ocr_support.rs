@@ -30,28 +30,29 @@ pub(crate) struct OcrCache {
 }
 
 impl OcrCache {
-    fn get(&self, width: usize, height: usize, rgb_crop: &[u8]) -> Option<String> {
-        if rgb_crop.len() > MAX_OCR_CACHE_BYTES {
-            return None;
-        }
-        let key = ocr_cache_key(width, height, rgb_crop);
+    fn get(
+        &self,
+        width: usize,
+        height: usize,
+        key: u64,
+        matches_rgb: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<String> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.access_clock = state.access_clock.wrapping_add(1);
         let access_clock = state.access_clock;
         let entry = state.entries.get_mut(&key)?;
-        if entry.width != width || entry.height != height || entry.rgb_crop != rgb_crop {
+        if entry.width != width || entry.height != height || !matches_rgb(&entry.rgb_crop) {
             return None;
         }
         entry.last_access = access_clock;
         Some(entry.text.clone())
     }
 
-    fn insert(&self, width: usize, height: usize, rgb_crop: Vec<u8>, text: String) {
+    fn insert(&self, width: usize, height: usize, key: u64, rgb_crop: Vec<u8>, text: String) {
         let entry_bytes = rgb_crop.len().saturating_add(text.len());
         if entry_bytes > MAX_OCR_CACHE_BYTES {
             return;
         }
-        let key = ocr_cache_key(width, height, &rgb_crop);
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
 
         if let Some(entry) = state.entries.get(&key) {
@@ -95,11 +96,20 @@ impl OcrCache {
     }
 }
 
-fn ocr_cache_key(width: usize, height: usize, rgb_crop: &[u8]) -> u64 {
+fn ocr_cache_key_rgba(
+    frame: &[u8],
+    frame_width: usize,
+    crop: &BoundingBox,
+    crop_bottom: usize,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
-    width.hash(&mut hasher);
-    height.hash(&mut hasher);
-    rgb_crop.hash(&mut hasher);
+    crop.width.hash(&mut hasher);
+    crop.height.hash(&mut hasher);
+    for y in crop.top..crop_bottom {
+        let row_start = (y * frame_width + crop.left) * 4;
+        let row_end = row_start + crop.width * 4;
+        frame[row_start..row_end].hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -163,20 +173,69 @@ fn recognize_text_inner(
     if !crop_is_large_enough(crop) {
         return Ok(String::new());
     }
-    let rgb_crop = crop_rgba_to_rgb(frame, frame_width, frame_height, crop)?;
-    if let Some(text) = ocr_cache.get(crop.width, crop.height, &rgb_crop) {
-        return Ok(text);
+    let (crop_right, crop_bottom) = validate_rgba_crop(frame, frame_width, frame_height, crop)?;
+    let rgb_len = crop_rgb_len(crop)?;
+    let cache_key = (rgb_len <= MAX_OCR_CACHE_BYTES)
+        .then(|| ocr_cache_key_rgba(frame, frame_width, crop, crop_bottom));
+    if let Some(cache_key) = cache_key {
+        if let Some(text) = ocr_cache.get(crop.width, crop.height, cache_key, |rgb_crop| {
+            rgb_crop_matches_rgba(rgb_crop, frame, frame_width, crop, crop_right, crop_bottom)
+        }) {
+            return Ok(text);
+        }
     }
+    let rgb_crop = crop_rgba_to_rgb_with_bounds(frame, frame_width, crop, crop_right, crop_bottom)?;
     let text = match backend {
         OcrBackend::Process => recognize_text_with_process(&rgb_crop, crop),
         OcrBackend::Library(engine) => recognize_text_with_library(engine, &rgb_crop, crop),
     }?;
-    ocr_cache.insert(crop.width, crop.height, rgb_crop, text.clone());
+    if let Some(cache_key) = cache_key {
+        ocr_cache.insert(crop.width, crop.height, cache_key, rgb_crop, text.clone());
+    }
     Ok(text)
+}
+
+fn rgb_crop_matches_rgba(
+    rgb_crop: &[u8],
+    frame: &[u8],
+    frame_width: usize,
+    crop: &BoundingBox,
+    crop_right: usize,
+    crop_bottom: usize,
+) -> bool {
+    let Some(expected_len) = crop
+        .width
+        .checked_mul(crop.height)
+        .and_then(|pixels| pixels.checked_mul(3))
+    else {
+        return false;
+    };
+    if rgb_crop.len() != expected_len {
+        return false;
+    }
+
+    let mut rgb_offset = 0;
+    for y in crop.top..crop_bottom {
+        for x in crop.left..crop_right {
+            let pixel = (y * frame_width + x) * 4;
+            if frame[pixel..pixel + 3] != rgb_crop[rgb_offset..rgb_offset + 3] {
+                return false;
+            }
+            rgb_offset += 3;
+        }
+    }
+    true
 }
 
 fn crop_is_large_enough(crop: &BoundingBox) -> bool {
     crop.width >= 20 && crop.height >= 5
+}
+
+fn crop_rgb_len(crop: &BoundingBox) -> io::Result<usize> {
+    crop.width
+        .checked_mul(crop.height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "crop dimensions overflow"))
 }
 
 fn recognize_text_with_process(rgb_crop: &[u8], crop: &BoundingBox) -> io::Result<String> {
@@ -255,6 +314,16 @@ fn crop_rgba_to_rgb(
     frame_height: usize,
     crop: &BoundingBox,
 ) -> io::Result<Vec<u8>> {
+    let (crop_right, crop_bottom) = validate_rgba_crop(frame, frame_width, frame_height, crop)?;
+    crop_rgba_to_rgb_with_bounds(frame, frame_width, crop, crop_right, crop_bottom)
+}
+
+fn validate_rgba_crop(
+    frame: &[u8],
+    frame_width: usize,
+    frame_height: usize,
+    crop: &BoundingBox,
+) -> io::Result<(usize, usize)> {
     let frame_len = frame_width
         .checked_mul(frame_height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -279,6 +348,16 @@ fn crop_rgba_to_rgb(
         ));
     }
 
+    Ok((crop_right, crop_bottom))
+}
+
+fn crop_rgba_to_rgb_with_bounds(
+    frame: &[u8],
+    frame_width: usize,
+    crop: &BoundingBox,
+    crop_right: usize,
+    crop_bottom: usize,
+) -> io::Result<Vec<u8>> {
     let rgb_len = crop
         .width
         .checked_mul(crop.height)
@@ -297,19 +376,22 @@ fn crop_rgba_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::{
-        crop_is_large_enough, crop_rgba_to_rgb, ocr_result_or_empty, recognize_text_inner,
-        OcrBackend, OcrCache, OcrSession, MAX_OCR_CACHE_ENTRIES,
+        crop_is_large_enough, crop_rgba_to_rgb, ocr_cache_key_rgba, ocr_result_or_empty,
+        recognize_text_inner, OcrBackend, OcrCache, OcrSession, MAX_OCR_CACHE_ENTRIES,
     };
     use crate::frame_processor::BoundingBox;
 
     #[test]
     fn caches_only_identical_rgb_crops_with_matching_dimensions() {
         let cache = OcrCache::default();
-        cache.insert(5, 5, vec![1, 2, 3], "cached".to_string());
+        cache.insert(5, 5, 1, vec![1, 2, 3], "cached".to_string());
 
-        assert_eq!(cache.get(5, 5, &[1, 2, 3]), Some("cached".to_string()));
-        assert_eq!(cache.get(3, 5, &[1, 2, 3]), None);
-        assert_eq!(cache.get(5, 5, &[1, 2, 4]), None);
+        assert_eq!(
+            cache.get(5, 5, 1, |rgb| rgb == [1, 2, 3]),
+            Some("cached".to_string())
+        );
+        assert_eq!(cache.get(3, 5, 1, |_| true), None);
+        assert_eq!(cache.get(5, 5, 1, |rgb| rgb == [1, 2, 4]), None);
     }
 
     #[test]
@@ -321,26 +403,47 @@ mod tests {
             bytes
         };
 
-        cache.insert(5, 5, crop_bytes(0), "zero".to_string());
-        cache.insert(5, 5, crop_bytes(1), "one".to_string());
-        assert_eq!(cache.get(5, 5, &crop_bytes(0)), Some("zero".to_string()));
+        cache.insert(5, 5, 0, crop_bytes(0), "zero".to_string());
+        cache.insert(5, 5, 1, crop_bytes(1), "one".to_string());
+        assert_eq!(cache.get(5, 5, 0, |_| true), Some("zero".to_string()));
         for index in 2..MAX_OCR_CACHE_ENTRIES as u64 {
-            cache.insert(5, 5, crop_bytes(index), index.to_string());
+            cache.insert(5, 5, index, crop_bytes(index), index.to_string());
         }
 
         cache.insert(
             5,
             5,
+            MAX_OCR_CACHE_ENTRIES as u64,
             crop_bytes(MAX_OCR_CACHE_ENTRIES as u64),
             "newest".to_string(),
         );
 
-        assert_eq!(cache.get(5, 5, &crop_bytes(0)), Some("zero".to_string()));
-        assert_eq!(cache.get(5, 5, &crop_bytes(1)), None);
+        assert_eq!(cache.get(5, 5, 0, |_| true), Some("zero".to_string()));
+        assert_eq!(cache.get(5, 5, 1, |_| true), None);
         assert_eq!(
-            cache.get(5, 5, &crop_bytes(MAX_OCR_CACHE_ENTRIES as u64)),
+            cache.get(5, 5, MAX_OCR_CACHE_ENTRIES as u64, |_| true),
             Some("newest".to_string())
         );
+    }
+
+    #[test]
+    fn returns_cached_text_without_running_ocr() {
+        let width = 20;
+        let height = 5;
+        let frame = vec![127; width * height * 4];
+        let crop = BoundingBox {
+            left: 0,
+            top: 0,
+            width,
+            height,
+        };
+        let rgb_crop = crop_rgba_to_rgb(&frame, width, height, &crop).unwrap();
+        let key = ocr_cache_key_rgba(&frame, width, &crop, height);
+        let cache = OcrCache::default();
+        cache.insert(width, height, key, rgb_crop, "cached".to_string());
+        let mut session = OcrSession::new(true, &cache);
+
+        assert_eq!(session.recognize(&frame, width, height, &crop, 1), "cached");
     }
 
     #[test]

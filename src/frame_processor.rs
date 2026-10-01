@@ -1,7 +1,7 @@
 use crate::ghost::{
     find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
     find_story_crop, horizontal_span_is_centered, text_crop_between_symbols,
-    title_crop_below_symbols, Location1Side,
+    title_crop_below_symbols, DetectorScratch, Location1Side,
 };
 use crate::ocr_support::{OcrCache, OcrSession};
 use std::fs::File;
@@ -84,6 +84,7 @@ pub(crate) fn process_frame(
     let seconds = elapsed_seconds % 60;
     let nanoseconds = elapsed_ns % 1_000_000_000;
     let mut ocr_session = OcrSession::new(use_tesseract_library, ocr_cache);
+    let mut detector_scratch = DetectorScratch::default();
     writeln!(
         output_file,
         "Frame {} at {:02}:{:02}:{:02}.{:09}: {}x{} ({} RGBA bytes)",
@@ -97,7 +98,7 @@ pub(crate) fn process_frame(
         frame.len()
     )?;
 
-    let symbols = find_diamond_symbols(state, frame);
+    let symbols = find_diamond_symbols(state, frame, &mut detector_scratch);
     let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
     for symbol in &symbols {
         if let Some(annotated_frame) = &mut annotated_frame {
@@ -152,7 +153,7 @@ pub(crate) fn process_frame(
         }
     }
 
-    let location_symbols = find_location_symbols(state, frame);
+    let location_symbols = find_location_symbols(state, frame, &mut detector_scratch);
     for symbol in &location_symbols {
         if let Some(annotated_frame) = &mut annotated_frame {
             draw_bounding_box(annotated_frame, state.frame_width, symbol);
@@ -181,7 +182,7 @@ pub(crate) fn process_frame(
         }
     }
 
-    let location1_symbols = find_location1_symbols(state, frame);
+    let location1_symbols = find_location1_symbols(state, frame, &mut detector_scratch);
     for symbol in &location1_symbols {
         if let Some(annotated_frame) = &mut annotated_frame {
             draw_bounding_box(annotated_frame, state.frame_width, &symbol.bounds);
