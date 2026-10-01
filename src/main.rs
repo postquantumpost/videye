@@ -17,7 +17,7 @@ fn run() -> Result<(), String> {
     let mut input = None;
     let mut output = None;
     let mut video_output = None;
-    let mut parallel_count = 4;
+    let mut parallel_count = 30;
     let mut check_story_line_thickness = true;
 
     while let Some(argument) = arguments.next() {
