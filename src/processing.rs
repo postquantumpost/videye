@@ -19,6 +19,7 @@ struct FrameProcessingResult {
 }
 
 struct FrameJob {
+    sequence: u64,
     current_frame: u64,
     frame: Vec<u8>,
 }
@@ -28,6 +29,7 @@ pub fn process_files(
     output: &str,
     video_output: Option<&str>,
     parallel_count: usize,
+    skip: usize,
     check_story_line_thickness: bool,
     use_tesseract_library: bool,
 ) -> Result<(), String> {
@@ -98,6 +100,7 @@ pub fn process_files(
     let mut history = History::new();
     let ocr_cache = OcrCache::default();
     let detector_priority = DetectorPriority::default();
+    let mut input_frames_seen = 0u64;
     thread::scope(|scope| {
         let (job_sender, job_receiver) = mpsc::sync_channel::<FrameJob>(parallel_count);
         let job_receiver = Arc::new(Mutex::new(job_receiver));
@@ -125,6 +128,7 @@ pub fn process_files(
                     let Ok(job) = job else {
                         break;
                     };
+                    let sequence = job.sequence;
                     let current_frame = job.current_frame;
                     let frame = job.frame;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -167,7 +171,7 @@ pub fn process_files(
                         ))
                     });
                     let failed = result.is_err();
-                    if result_sender.send((current_frame, frame, result)).is_err() || failed {
+                    if result_sender.send((sequence, frame, result)).is_err() || failed {
                         break;
                     }
                 }
@@ -178,11 +182,12 @@ pub fn process_files(
         let processing_result = (|| {
             let mut pending_results = BTreeMap::new();
             let mut available_frame_buffers = Vec::with_capacity(parallel_count);
-            let mut next_frame_number = state.current_frame;
+            let mut next_input_frame_number = 0u64;
+            let mut next_sequence = 0u64;
             let mut end_of_stream = false;
             loop {
                 while !end_of_stream
-                    && next_frame_number.saturating_sub(state.current_frame) < parallel_count as u64
+                    && next_sequence.saturating_sub(state.current_frame) < parallel_count as u64
                 {
                     let mut frame = available_frame_buffers
                         .pop()
@@ -208,22 +213,33 @@ pub fn process_files(
                     }
                     job_sender
                         .send(FrameJob {
-                            current_frame: next_frame_number,
+                            sequence: next_sequence,
+                            current_frame: next_input_frame_number,
                             frame,
                         })
                         .map_err(|_| "frame processing workers stopped unexpectedly".to_string())?;
-                    next_frame_number += 1;
+                    next_sequence += 1;
+                    next_input_frame_number += 1;
+                    input_frames_seen += 1;
+
+                    let skipped = skip_input_frames(&mut frames, skip, state.frame_size)
+                        .map_err(|error| format!("failed to skip input frames: {error}"))?;
+                    next_input_frame_number += skipped as u64;
+                    input_frames_seen += skipped as u64;
+                    if skipped < skip {
+                        end_of_stream = true;
+                    }
                 }
 
-                if end_of_stream && next_frame_number == state.current_frame {
+                if end_of_stream && next_sequence == state.current_frame {
                     break;
                 }
 
-                let (frame_number, frame, result) = result_receiver
+                let (sequence, frame, result) = result_receiver
                     .recv()
                     .map_err(|_| "frame processing workers stopped unexpectedly".to_string())?;
                 available_frame_buffers.push(frame);
-                pending_results.insert(frame_number, result);
+                pending_results.insert(sequence, result);
                 while let Some(result) = pending_results.remove(&state.current_frame) {
                     let result = result?;
                     output_file
@@ -278,19 +294,84 @@ pub fn process_files(
 
     let elapsed_seconds = started_at.elapsed().as_secs_f64();
     let frames_per_second = if elapsed_seconds > 0.0 {
-        state.current_frame as f64 / elapsed_seconds
+        input_frames_seen as f64 / elapsed_seconds
     } else {
         0.0
     };
     let summary = format!(
-        "Processed {} frames in {:.2} seconds ({:.2} FPS).",
-        state.current_frame, elapsed_seconds, frames_per_second
+        "Processed {} of {} input frames in {:.2} seconds ({:.2} FPS).",
+        state.current_frame, input_frames_seen, elapsed_seconds, frames_per_second
     );
     writeln!(output_file, "{summary}")
         .map_err(|error| format!("failed to write processing summary to {output}: {error}"))?;
     println!("{summary}");
 
     Ok(())
+}
+
+fn skip_input_frames<R: Read>(
+    reader: &mut R,
+    frame_count: usize,
+    frame_size: usize,
+) -> std::io::Result<usize> {
+    const DISCARD_BUFFER_SIZE: usize = 64 * 1024;
+    if frame_count == 0 {
+        return Ok(0);
+    }
+    if frame_size == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "frame size must be positive",
+        ));
+    }
+
+    let mut discard_buffer = [0; DISCARD_BUFFER_SIZE];
+    let mut skipped = 0;
+    while skipped < frame_count {
+        let mut bytes_remaining = frame_size;
+        while bytes_remaining > 0 {
+            let read_size = bytes_remaining.min(discard_buffer.len());
+            match reader.read(&mut discard_buffer[..read_size]) {
+                Ok(0) if bytes_remaining == frame_size => return Ok(skipped),
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "decoder returned an incomplete video frame",
+                    ));
+                }
+                Ok(bytes_read) => bytes_remaining -= bytes_read,
+                Err(error) => return Err(error),
+            }
+        }
+        skipped += 1;
+    }
+    Ok(skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_input_frames;
+    use std::io::{Cursor, ErrorKind};
+
+    #[test]
+    fn skips_only_complete_frames_and_reports_count() {
+        let mut input = Cursor::new(vec![0; 12]);
+
+        assert_eq!(skip_input_frames(&mut input, 2, 4).unwrap(), 2);
+        assert_eq!(input.position(), 8);
+        assert_eq!(skip_input_frames(&mut input, 2, 4).unwrap(), 1);
+        assert_eq!(input.position(), 12);
+    }
+
+    #[test]
+    fn rejects_incomplete_skipped_frame() {
+        let mut input = Cursor::new(vec![0; 5]);
+
+        assert_eq!(
+            skip_input_frames(&mut input, 2, 4).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
+    }
 }
 
 fn start_video_encoder(

@@ -9,7 +9,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--check-story-line-thickness true|false] [--use-tesseract-library true|false]");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--skip n] [--check-story-line-thickness true|false] [--use-tesseract-library true|false]");
         process::exit(2);
     }
 }
@@ -19,7 +19,8 @@ fn run() -> Result<(), String> {
     let mut input = None;
     let mut output = None;
     let mut video_output = None;
-    let mut parallel_count = 30;
+    let mut parallel_count = 16;
+    let mut skip = 0;
     let mut check_story_line_thickness = true;
     let mut use_tesseract_library = true;
 
@@ -39,6 +40,11 @@ fn run() -> Result<(), String> {
                 if parallel_count == 0 {
                     return Err("parallel count must be greater than zero".to_string());
                 }
+            }
+            "--skip" => {
+                skip = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid skip count: {value}"))?;
             }
             "--check-story-line-thickness" => {
                 check_story_line_thickness = match value.as_str() {
@@ -74,6 +80,7 @@ fn run() -> Result<(), String> {
             output,
             video_output.as_deref(),
             parallel_count,
+            skip,
             check_story_line_thickness,
             use_tesseract_library,
         )?;
