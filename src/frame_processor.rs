@@ -3,7 +3,7 @@ use crate::ghost::{
     find_story_crop, horizontal_span_is_centered, text_crop_between_symbols,
     title_crop_below_symbols, DetectorScratch, Location1Side,
 };
-use crate::ocr_support::{OcrCache, OcrSession};
+use crate::ocr_support::OcrSession;
 use std::fs::File;
 use std::io::{self, Write};
 
@@ -72,8 +72,7 @@ pub(crate) fn process_frame(
     frame: &[u8],
     output_file: &mut impl Write,
     annotate_frame: bool,
-    use_tesseract_library: bool,
-    ocr_cache: &OcrCache,
+    ocr_session: &mut OcrSession<'_>,
     history: &mut History,
 ) -> io::Result<Option<Vec<u8>>> {
     state.current_frame += 1;
@@ -83,7 +82,6 @@ pub(crate) fn process_frame(
     let minutes = (elapsed_seconds / 60) % 60;
     let seconds = elapsed_seconds % 60;
     let nanoseconds = elapsed_ns % 1_000_000_000;
-    let mut ocr_session = OcrSession::new(use_tesseract_library, ocr_cache);
     let mut detector_scratch = DetectorScratch::default();
     writeln!(
         output_file,

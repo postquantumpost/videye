@@ -2,11 +2,12 @@ use crate::frame_processor::{
     merge_history, process_frame, write_history, write_history_single_line, History,
     ProcessingState,
 };
-use crate::ocr_support::OcrCache;
+use crate::ocr_support::{OcrCache, OcrSession};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
@@ -14,6 +15,16 @@ struct FrameProcessingResult {
     log: Vec<u8>,
     annotated_frame: Option<Vec<u8>>,
     history: History,
+}
+
+struct FrameJob {
+    current_frame: u64,
+    frame: Vec<u8>,
+}
+
+struct FrameWorker {
+    job_sender: mpsc::Sender<FrameJob>,
+    result_receiver: mpsc::Receiver<Result<FrameProcessingResult, String>>,
 }
 
 pub fn process_files(
@@ -90,54 +101,134 @@ pub fn process_files(
     };
     let mut history = History::new();
     let ocr_cache = OcrCache::default();
-    loop {
-        let mut frame_batch = Vec::with_capacity(parallel_count);
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(parallel_count);
+        let mut worker_handles = Vec::with_capacity(parallel_count);
         for _ in 0..parallel_count {
-            let mut frame = vec![0; state.frame_size];
-            let mut bytes_read = 0;
-            while bytes_read < state.frame_size {
-                match frames.read(&mut frame[bytes_read..]) {
-                    Ok(0) if bytes_read == 0 => break,
-                    Ok(0) => return Err("decoder returned an incomplete video frame".to_string()),
-                    Ok(count) => bytes_read += count,
-                    Err(error) => {
-                        return Err(format!("failed to read decoded video frame: {error}"))
+            let (job_sender, job_receiver) = mpsc::channel::<FrameJob>();
+            let (result_sender, result_receiver) =
+                mpsc::channel::<Result<FrameProcessingResult, String>>();
+            let cache = &ocr_cache;
+            let frame_width = state.frame_width;
+            let frame_height = state.frame_height;
+            let frame_size = state.frame_size;
+            let frame_rate_num = state.frame_rate_num;
+            let frame_rate_den = state.frame_rate_den;
+            let check_story_line_thickness = state.check_story_line_thickness;
+            worker_handles.push(scope.spawn(move || {
+                let mut ocr_session = OcrSession::new(use_tesseract_library, cache);
+                while let Ok(job) = job_receiver.recv() {
+                    let mut frame_state = ProcessingState {
+                        current_frame: job.current_frame,
+                        frame_width,
+                        frame_height,
+                        frame_size,
+                        frame_rate_num,
+                        frame_rate_den,
+                        check_story_line_thickness,
+                    };
+                    let mut log = Vec::new();
+                    let mut history = History::new();
+                    let result = process_frame(
+                        &mut frame_state,
+                        &job.frame,
+                        &mut log,
+                        video_output.is_some(),
+                        &mut ocr_session,
+                        &mut history,
+                    )
+                    .map(|annotated_frame| FrameProcessingResult {
+                        log,
+                        annotated_frame,
+                        history,
+                    })
+                    .map_err(|error| {
+                        format!(
+                            "failed to process video frame {}: {error}",
+                            job.current_frame + 1
+                        )
+                    });
+                    if result_sender.send(result).is_err() {
+                        break;
                     }
                 }
-            }
-
-            if bytes_read == 0 {
-                break;
-            }
-            frame_batch.push(frame);
+            }));
+            workers.push(FrameWorker {
+                job_sender,
+                result_receiver,
+            });
         }
 
-        if frame_batch.is_empty() {
-            break;
-        }
+        let processing_result = (|| {
+            loop {
+                let mut frame_batch = Vec::with_capacity(parallel_count);
+                for _ in 0..parallel_count {
+                    let mut frame = vec![0; state.frame_size];
+                    let mut bytes_read = 0;
+                    while bytes_read < state.frame_size {
+                        match frames.read(&mut frame[bytes_read..]) {
+                            Ok(0) if bytes_read == 0 => break,
+                            Ok(0) => {
+                                return Err("decoder returned an incomplete video frame".to_string())
+                            }
+                            Ok(count) => bytes_read += count,
+                            Err(error) => {
+                                return Err(format!("failed to read decoded video frame: {error}"))
+                            }
+                        }
+                    }
 
-        let results = process_frame_batch(
-            frame_batch,
-            &state,
-            video_output.is_some(),
-            use_tesseract_library,
-            &ocr_cache,
-        )?;
-        for result in results {
-            output_file
-                .write_all(&result.log)
-                .map_err(|error| format!("failed to write frame log: {error}"))?;
-            if let (Some(video_frames), Some(annotated_frame)) =
-                (video_frames.as_mut(), result.annotated_frame)
-            {
-                video_frames
-                    .write_all(&annotated_frame)
-                    .map_err(|error| format!("failed to write encoded video frame: {error}"))?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    frame_batch.push(frame);
+                }
+
+                if frame_batch.is_empty() {
+                    break;
+                }
+
+                let batch_size = frame_batch.len();
+                for (offset, (worker, frame)) in
+                    workers.iter().zip(frame_batch.into_iter()).enumerate()
+                {
+                    worker
+                        .job_sender
+                        .send(FrameJob {
+                            current_frame: state.current_frame + offset as u64,
+                            frame,
+                        })
+                        .map_err(|_| "frame processing worker stopped unexpectedly".to_string())?;
+                }
+
+                for worker in workers.iter().take(batch_size) {
+                    let result = worker.result_receiver.recv().map_err(|_| {
+                        "frame processing worker stopped unexpectedly".to_string()
+                    })??;
+                    output_file
+                        .write_all(&result.log)
+                        .map_err(|error| format!("failed to write frame log: {error}"))?;
+                    if let (Some(video_frames), Some(annotated_frame)) =
+                        (video_frames.as_mut(), result.annotated_frame)
+                    {
+                        video_frames.write_all(&annotated_frame).map_err(|error| {
+                            format!("failed to write encoded video frame: {error}")
+                        })?;
+                    }
+                    merge_history(&mut history, result.history);
+                    state.current_frame += 1;
+                }
             }
-            merge_history(&mut history, result.history);
-            state.current_frame += 1;
+            Ok(())
+        })();
+        drop(workers);
+        for handle in worker_handles {
+            if handle.join().is_err() {
+                return Err("frame processing thread panicked".to_string());
+            }
         }
-    }
+        processing_result
+    })?;
 
     let status = decoder
         .wait()
@@ -179,74 +270,6 @@ pub fn process_files(
     println!("{summary}");
 
     Ok(())
-}
-
-fn process_frame_batch(
-    frames: Vec<Vec<u8>>,
-    state: &ProcessingState,
-    annotate_frames: bool,
-    use_tesseract_library: bool,
-    ocr_cache: &OcrCache,
-) -> Result<Vec<FrameProcessingResult>, String> {
-    let frame_width = state.frame_width;
-    let frame_height = state.frame_height;
-    let frame_size = state.frame_size;
-    let frame_rate_num = state.frame_rate_num;
-    let frame_rate_den = state.frame_rate_den;
-    let check_story_line_thickness = state.check_story_line_thickness;
-    let first_frame_number = state.current_frame;
-
-    thread::scope(|scope| {
-        let handles = frames
-            .into_iter()
-            .enumerate()
-            .map(|(offset, frame)| {
-                let current_frame = first_frame_number + offset as u64;
-                scope.spawn(move || -> Result<FrameProcessingResult, String> {
-                    let mut frame_state = ProcessingState {
-                        current_frame,
-                        frame_width,
-                        frame_height,
-                        frame_size,
-                        frame_rate_num,
-                        frame_rate_den,
-                        check_story_line_thickness,
-                    };
-                    let mut log = Vec::new();
-                    let mut history = History::new();
-                    let annotated_frame = process_frame(
-                        &mut frame_state,
-                        &frame,
-                        &mut log,
-                        annotate_frames,
-                        use_tesseract_library,
-                        ocr_cache,
-                        &mut history,
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "failed to process video frame {}: {error}",
-                            current_frame + 1
-                        )
-                    })?;
-                    Ok(FrameProcessingResult {
-                        log,
-                        annotated_frame,
-                        history,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| "frame processing thread panicked".to_string())??;
-            results.push(result);
-        }
-        Ok(results)
-    })
 }
 
 fn start_video_encoder(

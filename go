@@ -13,5 +13,5 @@ set -x
 #f=/media/jph/slow_bad_3/2026/09/2026090218291302_ghost_80.mp4
 f=../samples/samp.mp4
 cargo run -- --in $f --out notes.txt --parallel-count 16
-#cargo run -- --in $f --out notes.txt --parallel-count 16 --use-tesseract-library true
+#cargo run -- --in $f --out notes.txt --parallel-count 16 --use-tesseract-library false
 #cat notes.txt
