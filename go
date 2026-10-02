@@ -16,4 +16,5 @@ f=../samples/samp.mp4
 #cargo run -- --in $f --out notes.txt --parallel-count 32
 #cargo run -- --in $f --out notes.txt --parallel-count 16 --skip 59
 #cat notes.txt
-cargo run -- --in $f --out notes.txt --parallel-count 16
+#cargo run -- --in $f --out notes.txt --parallel-count 16
+cargo run -- --in $f --out notes.txt --parallel-count 16 --skip 4

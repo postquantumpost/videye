@@ -4,9 +4,12 @@ use crate::frame_processor::{
 };
 use crate::ghost::DetectorScratch;
 use crate::ocr_support::{OcrCache, OcrSession};
-use std::collections::BTreeMap;
+use gst::prelude::*;
+use gstreamer as gst;
+use gstreamer_app as gst_app;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -23,6 +26,185 @@ struct FrameJob {
     sequence: u64,
     current_frame: u64,
     frame: Vec<u8>,
+}
+
+#[derive(Default)]
+struct FrameSelection {
+    input_frames_seen: u64,
+    retained_indices: VecDeque<u64>,
+}
+
+struct FrameDecoder {
+    pipeline: gst::Pipeline,
+    sink: gst_app::AppSink,
+    selection: Arc<Mutex<FrameSelection>>,
+    frame_size: usize,
+}
+
+impl FrameDecoder {
+    fn new(input_uri: &str, skip: usize, frame_size: usize) -> Result<Self, String> {
+        gst::init().map_err(|error| format!("failed to initialize GStreamer: {error}"))?;
+
+        let pipeline = gst::Pipeline::new();
+        let source = make_element("uridecodebin")?;
+        source.set_property("uri", input_uri);
+        let queue = make_element("queue")?;
+        let drop_point = make_element("identity")?;
+        let convert = make_element("videoconvert")?;
+        let caps_filter = make_element("capsfilter")?;
+        let sink = gst_app::AppSink::builder()
+            .sync(false)
+            .max_buffers(4)
+            .build();
+        let sink_element = sink.clone().upcast::<gst::Element>();
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
+            .build();
+        caps_filter.set_property("caps", &caps);
+
+        pipeline
+            .add_many([
+                &source,
+                &queue,
+                &drop_point,
+                &convert,
+                &caps_filter,
+                &sink_element,
+            ])
+            .map_err(|error| format!("failed to build GStreamer decoder: {error}"))?;
+        gst::Element::link_many([&queue, &drop_point, &convert, &caps_filter, &sink_element])
+            .map_err(|error| format!("failed to link GStreamer decoder: {error}"))?;
+
+        let queue_sink = queue
+            .static_pad("sink")
+            .ok_or_else(|| "GStreamer decoder queue has no sink pad".to_string())?;
+        source.connect_pad_added(move |_source, pad| {
+            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+            let is_video = caps
+                .structure(0)
+                .is_some_and(|structure| structure.name().starts_with("video/"));
+            if is_video && !queue_sink.is_linked() {
+                if let Err(error) = pad.link(&queue_sink) {
+                    eprintln!("failed to link decoded video stream: {error}");
+                }
+            }
+        });
+
+        let selection = Arc::new(Mutex::new(FrameSelection::default()));
+        let probe_selection = Arc::clone(&selection);
+        let probe = drop_point
+            .static_pad("src")
+            .ok_or_else(|| "GStreamer frame drop point has no source pad".to_string())?
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                let Some(_buffer) = info.buffer() else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let mut selection = probe_selection
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let frame_index = selection.input_frames_seen;
+                selection.input_frames_seen = selection.input_frames_seen.saturating_add(1);
+                if frame_should_be_kept(frame_index, skip) {
+                    selection.retained_indices.push_back(frame_index);
+                    gst::PadProbeReturn::Ok
+                } else {
+                    gst::PadProbeReturn::Drop
+                }
+            })
+            .ok_or_else(|| "failed to install GStreamer frame drop probe".to_string())?;
+        let _ = probe;
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|error| format!("failed to start GStreamer decoder: {error}"))?;
+
+        Ok(Self {
+            pipeline,
+            sink,
+            selection,
+            frame_size,
+        })
+    }
+
+    fn next_frame(&mut self, mut frame: Vec<u8>) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let Some(sample) = self.sink.try_pull_sample(gst::ClockTime::NONE) else {
+            if let Some(error) = self.pipeline_error() {
+                return Err(error);
+            }
+            if self.sink.is_eos() {
+                return Ok(None);
+            }
+            return Err("GStreamer decoder stopped before end of stream".to_string());
+        };
+        let buffer = sample
+            .buffer()
+            .ok_or_else(|| "GStreamer decoder returned a sample without a buffer".to_string())?;
+        let mapped = buffer
+            .map_readable()
+            .map_err(|error| format!("failed to read decoded video frame: {error}"))?;
+        if mapped.as_slice().len() != self.frame_size {
+            return Err(format!(
+                "GStreamer returned a video frame with {} bytes; expected {}",
+                mapped.as_slice().len(),
+                self.frame_size
+            ));
+        }
+        frame.copy_from_slice(mapped.as_slice());
+        let frame_index = self
+            .selection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retained_indices
+            .pop_front()
+            .ok_or_else(|| "GStreamer returned a frame without a source index".to_string())?;
+        Ok(Some((frame_index, frame)))
+    }
+
+    fn input_frames_seen(&self) -> u64 {
+        self.selection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .input_frames_seen
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        if let Some(error) = self.pipeline_error() {
+            return Err(error);
+        }
+        self.pipeline
+            .set_state(gst::State::Null)
+            .map(|_| ())
+            .map_err(|error| format!("failed to stop GStreamer decoder: {error}"))
+    }
+
+    fn pipeline_error(&self) -> Option<String> {
+        let bus = self.pipeline.bus()?;
+        let message = bus.pop_filtered(&[gst::MessageType::Error])?;
+        match message.view() {
+            gst::MessageView::Error(error) => Some(format!(
+                "GStreamer decoder failed: {} ({:?})",
+                error.error(),
+                error.debug()
+            )),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for FrameDecoder {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+fn make_element(factory: &str) -> Result<gst::Element, String> {
+    gst::ElementFactory::make(factory)
+        .build()
+        .map_err(|error| format!("failed to create GStreamer {factory}: {error}"))
+}
+
+fn frame_stride(skip: usize) -> u64 {
+    u64::try_from(skip).unwrap_or(u64::MAX).saturating_add(1)
 }
 
 pub fn process_files(
@@ -51,25 +233,7 @@ pub fn process_files(
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| "video frame dimensions are too large".to_string())?;
     let input_uri = file_uri(input)?;
-    let mut decoder = Command::new("gst-launch-1.0")
-        .args(["-q", "uridecodebin"])
-        .arg(format!("uri={input_uri}"))
-        .args([
-            "!",
-            "queue",
-            "!",
-            "videoconvert",
-            "!",
-            "video/x-raw,format=RGBA",
-            "!",
-            "fdsink",
-            "fd=1",
-            "sync=false",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| format!("failed to start GStreamer decoder: {error}"))?;
+    let mut decoder = FrameDecoder::new(&input_uri, skip, frame_size)?;
     let mut video_encoder = video_output
         .map(|video_output| {
             start_video_encoder(video_output, width, height, frame_rate_num, frame_rate_den)
@@ -84,11 +248,6 @@ pub fn process_files(
                 .ok_or_else(|| "failed to write encoded video frames".to_string())
         })
         .transpose()?;
-    let stdout = decoder
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to read decoded video frames".to_string())?;
-    let mut frames = BufReader::new(stdout);
     let mut state = ProcessingState {
         current_frame: 0,
         frame_width: width,
@@ -101,7 +260,6 @@ pub fn process_files(
     let mut history = History::new();
     let ocr_cache = OcrCache::default();
     let detector_priority = DetectorPriority::default();
-    let mut input_frames_seen = 0u64;
     thread::scope(|scope| {
         let (job_sender, job_receiver) = mpsc::sync_channel::<FrameJob>(parallel_count);
         let job_receiver = Arc::new(Mutex::new(job_receiver));
@@ -185,53 +343,27 @@ pub fn process_files(
         let processing_result = (|| {
             let mut pending_results = BTreeMap::new();
             let mut available_frame_buffers = Vec::with_capacity(parallel_count);
-            let mut next_input_frame_number = 0u64;
             let mut next_sequence = 0u64;
             let mut end_of_stream = false;
             loop {
                 while !end_of_stream
                     && next_sequence.saturating_sub(state.current_frame) < parallel_count as u64
                 {
-                    let mut frame = available_frame_buffers
+                    let frame = available_frame_buffers
                         .pop()
                         .unwrap_or_else(|| vec![0; state.frame_size]);
-                    let mut bytes_read = 0;
-                    while bytes_read < state.frame_size {
-                        match frames.read(&mut frame[bytes_read..]) {
-                            Ok(0) if bytes_read == 0 => {
-                                end_of_stream = true;
-                                break;
-                            }
-                            Ok(0) => {
-                                return Err("decoder returned an incomplete video frame".to_string())
-                            }
-                            Ok(count) => bytes_read += count,
-                            Err(error) => {
-                                return Err(format!("failed to read decoded video frame: {error}"))
-                            }
-                        }
-                    }
-                    if end_of_stream {
+                    let Some((current_frame, frame)) = decoder.next_frame(frame)? else {
+                        end_of_stream = true;
                         break;
-                    }
+                    };
                     job_sender
                         .send(FrameJob {
                             sequence: next_sequence,
-                            current_frame: next_input_frame_number,
+                            current_frame,
                             frame,
                         })
                         .map_err(|_| "frame processing workers stopped unexpectedly".to_string())?;
                     next_sequence += 1;
-                    next_input_frame_number += 1;
-                    input_frames_seen += 1;
-
-                    let skipped = skip_input_frames(&mut frames, skip, state.frame_size)
-                        .map_err(|error| format!("failed to skip input frames: {error}"))?;
-                    next_input_frame_number += skipped as u64;
-                    input_frames_seen += skipped as u64;
-                    if skipped < skip {
-                        end_of_stream = true;
-                    }
                 }
 
                 if end_of_stream && next_sequence == state.current_frame {
@@ -270,12 +402,8 @@ pub fn process_files(
         processing_result
     })?;
 
-    let status = decoder
-        .wait()
-        .map_err(|error| format!("failed to wait for GStreamer decoder: {error}"))?;
-    if !status.success() {
-        return Err(format!("GStreamer decoder exited with status {status}"));
-    }
+    let input_frames_seen = decoder.input_frames_seen();
+    decoder.finish()?;
 
     drop(video_frames);
     if let Some(mut video_encoder) = video_encoder {
@@ -312,68 +440,44 @@ pub fn process_files(
     Ok(())
 }
 
-fn skip_input_frames<R: Read>(
-    reader: &mut R,
-    frame_count: usize,
-    frame_size: usize,
-) -> std::io::Result<usize> {
-    const DISCARD_BUFFER_SIZE: usize = 64 * 1024;
-    if frame_count == 0 {
-        return Ok(0);
-    }
-    if frame_size == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "frame size must be positive",
-        ));
-    }
-
-    let mut discard_buffer = [0; DISCARD_BUFFER_SIZE];
-    let mut skipped = 0;
-    while skipped < frame_count {
-        let mut bytes_remaining = frame_size;
-        while bytes_remaining > 0 {
-            let read_size = bytes_remaining.min(discard_buffer.len());
-            match reader.read(&mut discard_buffer[..read_size]) {
-                Ok(0) if bytes_remaining == frame_size => return Ok(skipped),
-                Ok(0) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "decoder returned an incomplete video frame",
-                    ));
-                }
-                Ok(bytes_read) => bytes_remaining -= bytes_read,
-                Err(error) => return Err(error),
-            }
-        }
-        skipped += 1;
-    }
-    Ok(skipped)
+fn frame_should_be_kept(frame_index: u64, skip: usize) -> bool {
+    frame_index % frame_stride(skip) == 0
 }
 
 #[cfg(test)]
 mod tests {
-    use super::skip_input_frames;
-    use std::io::{Cursor, ErrorKind};
+    use super::frame_should_be_kept;
 
     #[test]
-    fn skips_only_complete_frames_and_reports_count() {
-        let mut input = Cursor::new(vec![0; 12]);
+    fn keeps_every_n_plus_one_frame_from_the_source() {
+        let retained = (0..8)
+            .filter(|frame_index| frame_should_be_kept(*frame_index, 2))
+            .collect::<Vec<_>>();
 
-        assert_eq!(skip_input_frames(&mut input, 2, 4).unwrap(), 2);
-        assert_eq!(input.position(), 8);
-        assert_eq!(skip_input_frames(&mut input, 2, 4).unwrap(), 1);
-        assert_eq!(input.position(), 12);
+        assert_eq!(retained, [0, 3, 6]);
     }
 
     #[test]
-    fn rejects_incomplete_skipped_frame() {
-        let mut input = Cursor::new(vec![0; 5]);
+    fn skip_one_keeps_alternating_source_frames() {
+        let retained = (0..5)
+            .filter(|frame_index| frame_should_be_kept(*frame_index, 1))
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            skip_input_frames(&mut input, 2, 4).unwrap_err().kind(),
-            ErrorKind::UnexpectedEof
-        );
+        assert_eq!(retained, [0, 2, 4]);
+    }
+
+    #[test]
+    fn skip_zero_keeps_every_source_frame() {
+        assert!((0..8).all(|frame_index| frame_should_be_kept(frame_index, 0)));
+    }
+
+    #[test]
+    fn keeps_first_frame_when_eof_precedes_the_next_stride() {
+        let retained = (0..3)
+            .filter(|frame_index| frame_should_be_kept(*frame_index, 4))
+            .collect::<Vec<_>>();
+
+        assert_eq!(retained, [0]);
     }
 }
 
