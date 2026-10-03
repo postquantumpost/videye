@@ -9,7 +9,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--skip n] [--check-story-line-thickness true|false] [--use-tesseract-library true|false]");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--skip n] [--check-story-line-thickness true|false] [--use-tesseract-library true|false] [--verbose]");
         process::exit(2);
     }
 }
@@ -23,44 +23,52 @@ fn run() -> Result<(), String> {
     let mut skip = 0;
     let mut check_story_line_thickness = true;
     let mut use_tesseract_library = true;
+    let mut verbose = false;
 
     while let Some(argument) = arguments.next() {
-        let value = arguments
-            .next()
-            .ok_or_else(|| format!("missing value for {argument}"))?;
-
         match argument.as_str() {
-            "--in" => input = Some(value),
-            "--out" => output = Some(value),
-            "--vout" => video_output = Some(value),
-            "--parallel-count" => {
-                parallel_count = value
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid parallel count: {value}"))?;
-                if parallel_count == 0 {
-                    return Err("parallel count must be greater than zero".to_string());
+            "--verbose" => {
+                verbose = true;
+            }
+            _ => {
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| format!("missing value for {argument}"))?;
+
+                match argument.as_str() {
+                    "--in" => input = Some(value),
+                    "--out" => output = Some(value),
+                    "--vout" => video_output = Some(value),
+                    "--parallel-count" => {
+                        parallel_count = value
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid parallel count: {value}"))?;
+                        if parallel_count == 0 {
+                            return Err("parallel count must be greater than zero".to_string());
+                        }
+                    }
+                    "--skip" => {
+                        skip = value
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid skip count: {value}"))?;
+                    }
+                    "--check-story-line-thickness" => {
+                        check_story_line_thickness = match value.as_str() {
+                            "true" => true,
+                            "false" => false,
+                            _ => return Err(format!("invalid story line thickness check: {value}")),
+                        }
+                    }
+                    "--use-tesseract-library" => {
+                        use_tesseract_library = match value.as_str() {
+                            "true" => true,
+                            "false" => false,
+                            _ => return Err(format!("invalid Tesseract library setting: {value}")),
+                        }
+                    }
+                    _ => return Err(format!("unknown argument: {argument}")),
                 }
             }
-            "--skip" => {
-                skip = value
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid skip count: {value}"))?;
-            }
-            "--check-story-line-thickness" => {
-                check_story_line_thickness = match value.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err(format!("invalid story line thickness check: {value}")),
-                }
-            }
-            "--use-tesseract-library" => {
-                use_tesseract_library = match value.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err(format!("invalid Tesseract library setting: {value}")),
-                }
-            }
-            _ => return Err(format!("unknown argument: {argument}")),
         }
     }
 
@@ -83,6 +91,7 @@ fn run() -> Result<(), String> {
             skip,
             check_story_line_thickness,
             use_tesseract_library,
+            verbose,
         )?;
     }
 

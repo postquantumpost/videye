@@ -215,6 +215,7 @@ pub fn process_files(
     skip: usize,
     check_story_line_thickness: bool,
     use_tesseract_library: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     let started_at = Instant::now();
     let message = match video_output {
@@ -256,6 +257,7 @@ pub fn process_files(
         frame_rate_num,
         frame_rate_den,
         check_story_line_thickness,
+        verbose,
     };
     let mut history = History::new();
     let ocr_cache = OcrCache::default();
@@ -300,6 +302,7 @@ pub fn process_files(
                             frame_rate_num,
                             frame_rate_den,
                             check_story_line_thickness,
+                            verbose,
                         };
                         let mut log = Vec::new();
                         let mut history = History::new();
@@ -417,8 +420,10 @@ pub fn process_files(
         }
     }
 
-    write_history(&history, &mut output_file)
-        .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
+    if verbose {
+        write_history(&history, &mut output_file)
+            .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
+    }
     write_history_single_line(&history, &mut output_file).map_err(|error| {
         format!("failed to write single-line text history to {output}: {error}")
     })?;

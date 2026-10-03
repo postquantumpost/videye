@@ -24,6 +24,7 @@ pub(crate) struct ProcessingState {
     pub(crate) frame_rate_num: u32,
     pub(crate) frame_rate_den: u32,
     pub(crate) check_story_line_thickness: bool,
+    pub(crate) verbose: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -125,18 +126,20 @@ pub(crate) fn process_frame(
     let minutes = (elapsed_seconds / 60) % 60;
     let seconds = elapsed_seconds % 60;
     let nanoseconds = elapsed_ns % 1_000_000_000;
-    writeln!(
-        output_file,
-        "Frame {} at {:02}:{:02}:{:02}.{:09}: {}x{} ({} RGBA bytes)",
-        state.current_frame,
-        hours,
-        minutes,
-        seconds,
-        nanoseconds,
-        state.frame_width,
-        state.frame_height,
-        frame.len()
-    )?;
+    if state.verbose {
+        writeln!(
+            output_file,
+            "Frame {} at {:02}:{:02}:{:02}.{:09}: {}x{} ({} RGBA bytes)",
+            state.current_frame,
+            hours,
+            minutes,
+            seconds,
+            nanoseconds,
+            state.frame_width,
+            state.frame_height,
+            frame.len()
+        )?;
+    }
 
     let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
     for detector in detector_priority.order() {
