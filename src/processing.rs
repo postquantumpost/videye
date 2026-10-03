@@ -1,5 +1,5 @@
 use crate::frame_processor::{
-    merge_history, process_frame, write_history, write_history_single_line, DetectorPriority,
+    merge_history, process_frame, write_history, write_history_single_line, DetectorPriority, Game,
     History, ProcessingState,
 };
 use crate::ghost::DetectorScratch;
@@ -211,6 +211,7 @@ pub fn process_files(
     input: &str,
     output: &str,
     video_output: Option<&str>,
+    game: Game,
     parallel_count: usize,
     skip: usize,
     check_story_line_thickness: bool,
@@ -250,6 +251,7 @@ pub fn process_files(
         })
         .transpose()?;
     let mut state = ProcessingState {
+        game,
         current_frame: 0,
         frame_width: width,
         frame_height: height,
@@ -279,6 +281,7 @@ pub fn process_files(
             let frame_rate_num = state.frame_rate_num;
             let frame_rate_den = state.frame_rate_den;
             let check_story_line_thickness = state.check_story_line_thickness;
+            let game = state.game;
             worker_handles.push(scope.spawn(move || {
                 let mut ocr_session = OcrSession::new(use_tesseract_library, cache);
                 let mut detector_scratch = DetectorScratch::default();
@@ -295,6 +298,7 @@ pub fn process_files(
                     let frame = job.frame;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut frame_state = ProcessingState {
+                            game,
                             current_frame,
                             frame_width,
                             frame_height,

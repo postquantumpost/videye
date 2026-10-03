@@ -1,6 +1,8 @@
 use std::env;
 use std::process;
 
+use frame_processor::Game;
+
 mod frame_processor;
 mod ghost;
 mod ocr_support;
@@ -9,7 +11,7 @@ mod processing;
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        eprintln!("Usage: videye --in inputfile --out outputfile [--vout video_outputfile] [--parallel-count count] [--skip n] [--check-story-line-thickness true|false] [--use-tesseract-library true|false] [--verbose]");
+        eprintln!("Usage: videye --in inputfile --out outputfile [--game gt|er] [--vout video_outputfile] [--parallel-count count] [--skip n] [--check-story-line-thickness true|false] [--use-tesseract-library true|false] [--verbose]");
         process::exit(2);
     }
 }
@@ -19,6 +21,7 @@ fn run() -> Result<(), String> {
     let mut input = None;
     let mut output = None;
     let mut video_output = None;
+    let mut game = Game::default();
     let mut parallel_count = 16;
     let mut skip = 0;
     let mut check_story_line_thickness = true;
@@ -39,6 +42,13 @@ fn run() -> Result<(), String> {
                     "--in" => input = Some(value),
                     "--out" => output = Some(value),
                     "--vout" => video_output = Some(value),
+                    "--game" => {
+                        game = match value.as_str() {
+                            "gt" => Game::GhostofTsushima,
+                            "er" => Game::EldenRing,
+                            _ => return Err(format!("invalid game: {value}; use gt or er")),
+                        }
+                    }
                     "--parallel-count" => {
                         parallel_count = value
                             .parse::<usize>()
@@ -56,7 +66,9 @@ fn run() -> Result<(), String> {
                         check_story_line_thickness = match value.as_str() {
                             "true" => true,
                             "false" => false,
-                            _ => return Err(format!("invalid story line thickness check: {value}")),
+                            _ => {
+                                return Err(format!("invalid story line thickness check: {value}"))
+                            }
                         }
                     }
                     "--use-tesseract-library" => {
@@ -87,6 +99,7 @@ fn run() -> Result<(), String> {
             input,
             output,
             video_output.as_deref(),
+            game,
             parallel_count,
             skip,
             check_story_line_thickness,

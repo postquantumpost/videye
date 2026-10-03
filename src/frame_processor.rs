@@ -1,12 +1,19 @@
 use crate::ghost::{
-    find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
-    find_story_crop, horizontal_span_is_centered, text_crop_between_symbols,
+    find_combat1_crop, find_diamond_symbols, find_grace_detection, find_location1_symbols,
+    find_location_symbols, find_story_crop, horizontal_span_is_centered, text_crop_between_symbols,
     title_crop_below_symbols, DetectorScratch, Location1Side,
 };
 use crate::ocr_support::OcrSession;
 use std::fs::File;
 use std::io::{self, Write};
 use std::sync::Mutex;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Game {
+    #[default]
+    GhostofTsushima,
+    EldenRing,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BoundingBox {
@@ -17,6 +24,7 @@ pub(crate) struct BoundingBox {
 }
 
 pub(crate) struct ProcessingState {
+    pub(crate) game: Game,
     pub(crate) current_frame: u64,
     pub(crate) frame_width: usize,
     pub(crate) frame_height: usize,
@@ -59,12 +67,19 @@ pub(crate) struct Combat1 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Grace {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HistoryEntry {
     TextAct(TextAct),
     Location1(Location1),
     Location2(Location2),
     Story(Story),
     Combat1(Combat1),
+    Grace(Grace),
 }
 
 pub(crate) type History = Vec<HistoryEntry>;
@@ -142,6 +157,19 @@ pub(crate) fn process_frame(
     }
 
     let mut annotated_frame = annotate_frame.then(|| frame.to_vec());
+    if state.game == Game::EldenRing {
+        process_grace_detector(
+            state,
+            frame,
+            output_file,
+            &mut annotated_frame,
+            ocr_session,
+            history,
+            elapsed_ns,
+        )?;
+        return Ok(annotated_frame);
+    }
+
     for detector in detector_priority.order() {
         let matched = match detector {
             Detector::Act => process_act_detector(
@@ -199,6 +227,46 @@ pub(crate) fn process_frame(
         }
     }
     Ok(annotated_frame)
+}
+
+fn process_grace_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<()> {
+    let Some(detection) = find_grace_detection(frame, state.frame_width, state.frame_height) else {
+        return Ok(());
+    };
+
+    if let Some(annotated_frame) = annotated_frame {
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.symbol);
+    }
+    writeln!(
+        output_file,
+        "Grace symbol: x={} y={} width={} height={}",
+        detection.symbol.left,
+        detection.symbol.top,
+        detection.symbol.width,
+        detection.symbol.height
+    )?;
+    let name = ocr_session
+        .recognize(
+            frame,
+            state.frame_width,
+            state.frame_height,
+            &detection.label,
+            state.current_frame,
+        )
+        .trim()
+        .to_string();
+    if !name.is_empty() {
+        add_grace(history, elapsed_ns, name);
+    }
+    Ok(())
 }
 
 fn process_act_detector(
@@ -459,6 +527,7 @@ fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, act
         HistoryEntry::Location1(_) => false,
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
+        HistoryEntry::Grace(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::TextAct(TextAct {
@@ -477,6 +546,7 @@ fn add_location2(history: &mut History, timestamp_ns: u128, location2: String) {
         HistoryEntry::Location1(_) => false,
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
+        HistoryEntry::Grace(_) => false,
         HistoryEntry::Location2(previous) => {
             previous.location2 == location2
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
@@ -501,6 +571,7 @@ fn add_location1(history: &mut History, timestamp_ns: u128, location1: String) {
         HistoryEntry::TextAct(_) | HistoryEntry::Location2(_) => false,
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
+        HistoryEntry::Grace(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Location1(Location1 {
@@ -521,7 +592,8 @@ fn add_story(history: &mut History, timestamp_ns: u128, text: String) {
         HistoryEntry::TextAct(_)
         | HistoryEntry::Location1(_)
         | HistoryEntry::Location2(_)
-        | HistoryEntry::Combat1(_) => false,
+        | HistoryEntry::Combat1(_)
+        | HistoryEntry::Grace(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Story(Story { timestamp_ns, text }));
@@ -539,10 +611,30 @@ fn add_combat1(history: &mut History, timestamp_ns: u128, text: String) {
         HistoryEntry::TextAct(_)
         | HistoryEntry::Location1(_)
         | HistoryEntry::Location2(_)
-        | HistoryEntry::Story(_) => false,
+        | HistoryEntry::Story(_)
+        | HistoryEntry::Grace(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Combat1(Combat1 { timestamp_ns, text }));
+    }
+}
+
+fn add_grace(history: &mut History, timestamp_ns: u128, name: String) {
+    const DUPLICATE_WINDOW_NS: u128 = 20_000_000_000;
+
+    let is_duplicate = history.iter().any(|entry| match entry {
+        HistoryEntry::Grace(previous) => {
+            previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= DUPLICATE_WINDOW_NS
+        }
+        HistoryEntry::TextAct(_)
+        | HistoryEntry::Location1(_)
+        | HistoryEntry::Location2(_)
+        | HistoryEntry::Story(_)
+        | HistoryEntry::Combat1(_) => false,
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Grace(Grace { timestamp_ns, name }));
     }
 }
 
@@ -565,6 +657,7 @@ pub(crate) fn merge_history(history: &mut History, frame_history: History) {
             HistoryEntry::Combat1(combat1) => {
                 add_combat1(history, combat1.timestamp_ns, combat1.text)
             }
+            HistoryEntry::Grace(grace) => add_grace(history, grace.timestamp_ns, grace.name),
         }
     }
 }
@@ -633,6 +726,18 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 )?;
                 writeln!(output_file, "Combat1: {}", combat1.text)?;
             }
+            HistoryEntry::Grace(grace) => {
+                let elapsed_seconds = grace.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = grace.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Grace at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Grace: {}", grace.name)?;
+            }
         }
     }
     Ok(())
@@ -697,6 +802,14 @@ pub(crate) fn write_history_single_line(
                 let timestamp = format_history_timestamp(hours, minutes, seconds);
                 writeln!(output_file, "{timestamp} combat1: {}", combat1.text)?;
             }
+            HistoryEntry::Grace(grace) => {
+                let elapsed_seconds = grace.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                writeln!(output_file, "{timestamp} grace: {}", grace.name)?;
+            }
         }
     }
     Ok(())
@@ -733,7 +846,7 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_combat1, add_location1, add_location2, add_story, add_textact,
+        add_combat1, add_grace, add_location1, add_location2, add_story, add_textact,
         write_history_single_line, BoundingBox, Detector, DetectorPriority, HistoryEntry,
     };
 
@@ -837,6 +950,42 @@ mod tests {
     }
 
     #[test]
+    fn writes_grace_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_grace(&mut history, 2_000_000_000, "Road to the Manor".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output).unwrap();
+
+        assert_eq!(output, b"2 grace: Road to the Manor\n");
+    }
+
+    #[test]
+    fn deduplicates_matching_grace_entries_within_twenty_seconds() {
+        let mut history = Vec::new();
+        add_grace(&mut history, 1_000_000_000, "Road to the Manor".to_string());
+        add_grace(
+            &mut history,
+            20_000_000_000,
+            "Road to the Manor".to_string(),
+        );
+        add_grace(
+            &mut history,
+            21_000_000_001,
+            "Road to the Manor".to_string(),
+        );
+
+        let graces: Vec<&str> = history
+            .iter()
+            .map(|entry| match entry {
+                HistoryEntry::Grace(grace) => grace.name.as_str(),
+                _ => panic!("unexpected history entry"),
+            })
+            .collect();
+        assert_eq!(graces, vec!["Road to the Manor", "Road to the Manor"]);
+    }
+
+    #[test]
     fn deduplicates_matching_textacts_within_twenty_seconds() {
         let mut history = Vec::new();
         add_textact(
@@ -872,6 +1021,7 @@ mod tests {
                 HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
+                HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
             })
             .collect();
         assert_eq!(
@@ -903,6 +1053,7 @@ mod tests {
                 HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
                 HistoryEntry::Story(story) => story.text.as_str(),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
+                HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
             })
             .collect();
         assert_eq!(stories, vec!["From the darkness", "From the darkness"]);
@@ -935,6 +1086,7 @@ mod tests {
                 HistoryEntry::Location2(location) => location.location2.as_str(),
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
+                HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
             })
             .collect();
         assert_eq!(
@@ -958,6 +1110,7 @@ mod tests {
                 HistoryEntry::Location2(_) => panic!("unexpected Location2 entry"),
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
+                HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
             })
             .collect();
         assert_eq!(locations, vec!["Kin Prefecture", "Kin Prefecture"]);

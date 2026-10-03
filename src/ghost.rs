@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::frame_processor::Game;
 use crate::frame_processor::{BoundingBox, ProcessingState};
 
 struct Component {
@@ -24,6 +26,11 @@ pub(crate) enum Location1Side {
 pub(crate) struct Location1Symbol {
     pub(crate) bounds: BoundingBox,
     pub(crate) side: Location1Side,
+}
+
+pub(crate) struct GraceDetection {
+    pub(crate) symbol: BoundingBox,
+    pub(crate) label: BoundingBox,
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +167,252 @@ pub(crate) fn find_location_symbols(
 ) -> Vec<BoundingBox> {
     let center_y = state.frame_height.saturating_mul(24) / 100;
     find_diamond_symbols_in_band(state, frame, center_y, is_bright_pixel, scratch)
+}
+
+pub(crate) fn find_grace_detection(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<GraceDetection> {
+    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || frame.len() < expected_len {
+        return None;
+    }
+
+    let expected_size = (height.saturating_mul(55) / 1_000).max(12);
+    let min_size = (expected_size.saturating_mul(85) / 100).max(8);
+    let max_size = (expected_size.saturating_mul(115) / 100).min(width.min(height));
+    if min_size > max_size {
+        return None;
+    }
+
+    let expected_left = width.saturating_mul(25) / 1_000;
+    let expected_top = height.saturating_mul(12) / 100;
+    let x_radius = (width.saturating_mul(12) / 1_000).max(2);
+    let y_radius = (height.saturating_mul(15) / 1_000).max(2);
+    let position_step = (expected_size / 12).max(1);
+    let x_positions = grace_candidate_positions(
+        expected_left,
+        x_radius,
+        width.saturating_sub(min_size),
+        position_step,
+    );
+    let y_positions = grace_candidate_positions(
+        expected_top,
+        y_radius,
+        height.saturating_sub(min_size),
+        position_step,
+    );
+
+    let mut best: Option<(f32, BoundingBox)> = None;
+    for size in min_size..=max_size {
+        for &left in &x_positions {
+            if left.saturating_add(size) > width {
+                continue;
+            }
+            for &top in &y_positions {
+                if top.saturating_add(size) > height {
+                    continue;
+                }
+                let Some(border_score) = grace_border_score(frame, width, height, left, top, size)
+                else {
+                    continue;
+                };
+                let position_penalty = left.abs_diff(expected_left) as f32 / x_radius.max(1) as f32
+                    + top.abs_diff(expected_top) as f32 / y_radius.max(1) as f32;
+                let size_penalty =
+                    size.abs_diff(expected_size) as f32 / expected_size.max(1) as f32;
+                let score = border_score - position_penalty * 0.08 - size_penalty * 0.12;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score > *best_score)
+                {
+                    best = Some((
+                        score,
+                        BoundingBox {
+                            left,
+                            top,
+                            width: size,
+                            height: size,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    let (_, symbol) = best?;
+    let label_left = symbol
+        .left
+        .saturating_add(symbol.width)
+        .saturating_add((width.saturating_mul(8) / 1_000).max(2));
+    let label_top = symbol
+        .top
+        .saturating_add(symbol.height.saturating_mul(15) / 100);
+    if label_left >= width || label_top >= height {
+        return None;
+    }
+    let label_height = (symbol.height.saturating_mul(75) / 100)
+        .max(5)
+        .min(height - label_top);
+    let label_width = (width.saturating_mul(26) / 100).min(width - label_left);
+    (label_width >= 20 && label_height >= 5).then_some(GraceDetection {
+        symbol,
+        label: BoundingBox {
+            left: label_left,
+            top: label_top,
+            width: label_width,
+            height: label_height,
+        },
+    })
+}
+
+fn grace_candidate_positions(
+    center: usize,
+    radius: usize,
+    limit: usize,
+    step: usize,
+) -> Vec<usize> {
+    let start = center.saturating_sub(radius).min(limit);
+    let end = center.saturating_add(radius).min(limit);
+    let mut positions = (start..=end).step_by(step).collect::<Vec<_>>();
+    positions.push(center.clamp(start, end));
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+fn grace_border_score(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    left: usize,
+    top: usize,
+    size: usize,
+) -> Option<f32> {
+    let mut supported = [0usize; 4];
+    let mut samples = 0usize;
+    let sample_step = (size / 20).max(1);
+    let border_width = (size / 32).max(1).min(2);
+    let mut position = 2usize;
+    while position + 2 < size {
+        for offset in 0..border_width {
+            let candidates = [
+                (
+                    (left + position, top + offset),
+                    (left + position, top.saturating_sub(1)),
+                ),
+                (
+                    (left + position, top + size - 1 - offset),
+                    (left + position, top + size),
+                ),
+                (
+                    (left + offset, top + position),
+                    (left.saturating_sub(1), top + position),
+                ),
+                (
+                    (left + size - 1 - offset, top + position),
+                    (left + size, top + position),
+                ),
+            ];
+            for (edge, ((x, y), (neighbor_x, neighbor_y))) in candidates.into_iter().enumerate() {
+                samples += 1;
+                if is_grace_border_pixel(frame, width, height, x, y, neighbor_x, neighbor_y) {
+                    supported[edge] += 1;
+                }
+            }
+        }
+        position = position.saturating_add(sample_step);
+    }
+
+    let edge_samples = samples / 4;
+    if edge_samples == 0 {
+        return None;
+    }
+    let ratios = supported.map(|support| support as f32 / edge_samples as f32);
+    if ratios.iter().any(|ratio| *ratio < 0.45) {
+        return None;
+    }
+    Some(ratios.iter().sum::<f32>() / ratios.len() as f32)
+}
+
+fn is_grace_border_pixel(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    neighbor_x: usize,
+    neighbor_y: usize,
+) -> bool {
+    if neighbor_x >= width || neighbor_y >= height {
+        return false;
+    }
+    let pixel = (y * width + x) * 4;
+    let red = frame[pixel];
+    let green = frame[pixel + 1];
+    let blue = frame[pixel + 2];
+    let minimum = red.min(green).min(blue);
+    let maximum = red.max(green).max(blue);
+    let luma = (299 * u32::from(red) + 587 * u32::from(green) + 114 * u32::from(blue)) / 1_000;
+    let neighbor = (neighbor_y * width + neighbor_x) * 4;
+    let neighbor_luma = (299 * u32::from(frame[neighbor])
+        + 587 * u32::from(frame[neighbor + 1])
+        + 114 * u32::from(frame[neighbor + 2]))
+        / 1_000;
+    minimum >= 45 && maximum <= 230 && maximum - minimum <= 70 && luma.abs_diff(neighbor_luma) >= 12
+}
+
+#[cfg(test)]
+mod grace_detection_tests {
+    use super::find_grace_detection;
+
+    #[test]
+    fn finds_the_scaled_grace_box_and_label_crop() {
+        for (width, height) in [(480, 300), (1_365, 768)] {
+            let left = width * 25 / 1_000;
+            let top = height * 12 / 100;
+            let size = height * 55 / 1_000;
+            let mut frame = vec![0; width * height * 4];
+            for pixel in frame.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            for offset in 0..2 {
+                for position in 0..size {
+                    set_gray_pixel(&mut frame, width, left + position, top + offset);
+                    set_gray_pixel(&mut frame, width, left + position, top + size - 1 - offset);
+                    set_gray_pixel(&mut frame, width, left + offset, top + position);
+                    set_gray_pixel(&mut frame, width, left + size - 1 - offset, top + position);
+                }
+            }
+
+            let detection = find_grace_detection(&frame, width, height).unwrap();
+            assert_eq!(detection.symbol.left, left);
+            assert_eq!(detection.symbol.top, top);
+            assert_eq!(detection.symbol.width, size);
+            assert_eq!(detection.symbol.height, size);
+            assert!(detection.label.left > detection.symbol.left + detection.symbol.width);
+            assert!(detection.label.width > 0 && detection.label.height > 0);
+        }
+    }
+
+    #[test]
+    fn rejects_frames_without_a_grace_box() {
+        let width = 480;
+        let height = 300;
+        let frame = vec![0; width * height * 4];
+
+        assert!(find_grace_detection(&frame, width, height).is_none());
+        assert!(find_grace_detection(&frame[..10], width, height).is_none());
+
+        let gray_frame = vec![100; width * height * 4];
+        assert!(find_grace_detection(&gray_frame, width, height).is_none());
+    }
+
+    fn set_gray_pixel(frame: &mut [u8], width: usize, x: usize, y: usize) {
+        let pixel = (y * width + x) * 4;
+        frame[pixel..pixel + 4].copy_from_slice(&[150, 150, 150, 255]);
+    }
 }
 
 pub(crate) fn find_location1_symbols(
@@ -1169,6 +1422,7 @@ mod tests {
         draw_symbol(&mut frame, width, 120, height / 2);
         draw_symbol(&mut frame, width, 360, height / 2);
         let state = ProcessingState {
+            game: Game::GhostofTsushima,
             current_frame: 0,
             frame_width: width,
             frame_height: height,
@@ -1176,6 +1430,7 @@ mod tests {
             frame_rate_num: 1,
             frame_rate_den: 1,
             check_story_line_thickness: false,
+            verbose: false,
         };
         let mut scratch = DetectorScratch::default();
 
@@ -1209,6 +1464,7 @@ mod tests {
         draw_white_symbol(&mut frame, width, 120, height * 24 / 100);
         draw_white_symbol(&mut frame, width, 360, height * 24 / 100);
         let state = ProcessingState {
+            game: Game::GhostofTsushima,
             current_frame: 0,
             frame_width: width,
             frame_height: height,
@@ -1216,6 +1472,7 @@ mod tests {
             frame_rate_num: 1,
             frame_rate_den: 1,
             check_story_line_thickness: false,
+            verbose: false,
         };
         let mut scratch = DetectorScratch::default();
 
@@ -1250,6 +1507,7 @@ mod tests {
         draw_location1_symbol(&mut frame, width, 100, center_y, false);
         draw_location1_symbol(&mut frame, width, 380, center_y, true);
         let state = ProcessingState {
+            game: Game::GhostofTsushima,
             current_frame: 0,
             frame_width: width,
             frame_height: height,
@@ -1257,6 +1515,7 @@ mod tests {
             frame_rate_num: 1,
             frame_rate_den: 1,
             check_story_line_thickness: false,
+            verbose: false,
         };
         let mut scratch = DetectorScratch::default();
 
@@ -1275,6 +1534,7 @@ mod tests {
         let height = 300;
         let frame = vec![255; width * height * 4];
         let state = ProcessingState {
+            game: Game::GhostofTsushima,
             current_frame: 0,
             frame_width: width,
             frame_height: height,
@@ -1282,6 +1542,7 @@ mod tests {
             frame_rate_num: 1,
             frame_rate_den: 1,
             check_story_line_thickness: false,
+            verbose: false,
         };
         let mut scratch = DetectorScratch::default();
 
@@ -1411,6 +1672,7 @@ mod tests {
         let height = 2;
         let frame = vec![255; width * height * 3];
         let state = ProcessingState {
+            game: Game::GhostofTsushima,
             current_frame: 0,
             frame_width: width,
             frame_height: height,
@@ -1418,6 +1680,7 @@ mod tests {
             frame_rate_num: 1,
             frame_rate_den: 1,
             check_story_line_thickness: false,
+            verbose: false,
         };
 
         let mut scratch = super::DetectorScratch::default();
