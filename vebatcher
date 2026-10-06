@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+# f=/media/jph/slow_bad_3/2026/09/2026090218291302_ghost_80.mp4
+
+for f in $*
+do
+    echo ''
+    f2=${f%.*}.txt
+    echo process $f to $f2
+    if [ -f "$f2" ];then
+        echo $f2 already exists
+    else
+        #echo cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
+        #cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
+        echo videye --in $f --out $f2 --parallel-count 16 --skip 3 --game er
+        videye --in $f --out $f2 --parallel-count 16 --skip 3 --game er
+    fi
+done
