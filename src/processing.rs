@@ -433,9 +433,9 @@ pub fn process_files(
         write_history(&history, &mut output_file)
             .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
     }
-    write_history_single_line(&history, &mut output_file).map_err(|error| {
-        format!("failed to write single-line text history to {output}: {error}")
-    })?;
+    write_history_single_line(&history, &mut output_file, frame_rate_num, frame_rate_den).map_err(
+        |error| format!("failed to write single-line text history to {output}: {error}"),
+    )?;
 
     let elapsed_seconds = started_at.elapsed().as_secs_f64();
     let frames_per_second = if elapsed_seconds > 0.0 {

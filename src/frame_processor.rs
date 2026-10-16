@@ -1353,15 +1353,14 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
 pub(crate) fn write_history_single_line(
     history: &History,
     output_file: &mut impl Write,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
 ) -> io::Result<()> {
     for entry in history {
         match entry {
             HistoryEntry::TextAct(textact) => {
-                let elapsed_seconds = textact.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(textact.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(
                     output_file,
                     "{timestamp} act: {}, {}",
@@ -1369,11 +1368,11 @@ pub(crate) fn write_history_single_line(
                 )?;
             }
             HistoryEntry::Location2(location2) => {
-                let elapsed_seconds = location2.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp = format_history_timestamp(
+                    location2.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                );
                 writeln!(
                     output_file,
                     "{timestamp} location2: {}",
@@ -1381,11 +1380,11 @@ pub(crate) fn write_history_single_line(
                 )?;
             }
             HistoryEntry::Location1(location1) => {
-                let elapsed_seconds = location1.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp = format_history_timestamp(
+                    location1.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                );
                 writeln!(
                     output_file,
                     "{timestamp} location1: {}",
@@ -1393,59 +1392,41 @@ pub(crate) fn write_history_single_line(
                 )?;
             }
             HistoryEntry::Story(story) => {
-                let elapsed_seconds = story.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(story.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} story: {}", story.text)?;
             }
             HistoryEntry::Combat1(combat1) => {
-                let elapsed_seconds = combat1.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp = format_history_timestamp(
+                    combat1.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                );
                 writeln!(output_file, "{timestamp} combat1: {}", combat1.text)?;
             }
             HistoryEntry::Grace(grace) => {
-                let elapsed_seconds = grace.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(grace.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} grace: {}", grace.name)?;
             }
             HistoryEntry::Place(place) => {
-                let elapsed_seconds = place.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} place: {}", place.name)?;
             }
             HistoryEntry::LostGraceDiscovered(event) => {
-                let elapsed_seconds = event.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(event.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} lost_grace_discovered")?;
             }
             HistoryEntry::Region(region) => {
-                let elapsed_seconds = region.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(region.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} region: {}", region.name)?;
             }
             HistoryEntry::Boss(boss) => {
-                let elapsed_seconds = boss.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let timestamp = format_history_timestamp(hours, minutes, seconds);
+                let timestamp =
+                    format_history_timestamp(boss.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} boss: {}", boss.name)?;
             }
         }
@@ -1453,12 +1434,25 @@ pub(crate) fn write_history_single_line(
     Ok(())
 }
 
-fn format_history_timestamp(hours: u128, minutes: u128, seconds: u128) -> String {
-    match (hours, minutes) {
-        (0, 0) => seconds.to_string(),
+fn format_history_timestamp(
+    timestamp_ns: u128,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
+) -> String {
+    let elapsed_seconds = timestamp_ns / 1_000_000_000;
+    let hours = elapsed_seconds / 3_600;
+    let minutes = (elapsed_seconds / 60) % 60;
+    let seconds = elapsed_seconds % 60;
+    let frame_denominator = 1_000_000_000 * u128::from(frame_rate_den);
+    let frame_remainder = timestamp_ns % 1_000_000_000;
+    let frame =
+        (frame_remainder * u128::from(frame_rate_num) + frame_denominator / 2) / frame_denominator;
+    let time = match (hours, minutes) {
+        (0, 0) => format!("0:{seconds:02}"),
         (0, minutes) => format!("{minutes}:{seconds:02}"),
         (hours, minutes) => format!("{hours}:{minutes:02}:{seconds:02}"),
-    }
+    };
+    format!("{time} (:{frame})")
 }
 
 fn draw_bounding_box(frame: &mut [u8], frame_width: usize, bounds: &BoundingBox) {
@@ -1485,9 +1479,13 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 mod tests {
     use super::{
         add_boss, add_combat1, add_grace, add_location1, add_location2, add_lost_grace_discovered,
-        add_place, add_region, add_story, add_textact, merge_history, write_history_single_line,
-        BoundingBox, Detector, DetectorPriority, EldenDetector, HistoryEntry, Place,
+        add_place, add_region, add_story, add_textact, merge_history, BoundingBox, Detector,
+        DetectorPriority, EldenDetector, HistoryEntry, Place,
     };
+
+    fn write_history_single_line(history: &super::History, output: &mut Vec<u8>) {
+        super::write_history_single_line(history, output, 30, 1).unwrap();
+    }
 
     #[test]
     fn moves_detected_detector_to_front_and_preserves_remaining_order() {
@@ -1555,15 +1553,45 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"1:01:01 act: A12, Opening\n");
+        assert_eq!(output, b"1:01:01 (:0) act: A12, Opening\n");
+    }
+
+    #[test]
+    fn writes_subsecond_frame_number_on_single_line() {
+        let mut history = Vec::new();
+        add_textact(
+            &mut history,
+            2_500_000_000,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+        let mut output = Vec::new();
+
+        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+
+        assert_eq!(output, b"0:02 (:15) act: A12, Opening\n");
     }
 
     #[test]
     fn omits_zero_leading_timestamp_fields() {
-        assert_eq!(super::format_history_timestamp(0, 1, 2), "1:02");
-        assert_eq!(super::format_history_timestamp(0, 0, 2), "2");
+        assert_eq!(
+            super::format_history_timestamp(61_000_000_000, 30, 1),
+            "1:01 (:0)"
+        );
+        assert_eq!(
+            super::format_history_timestamp(2_500_000_000, 30, 1),
+            "0:02 (:15)"
+        );
+        assert_eq!(
+            super::format_history_timestamp(3_661_100_000_000, 30, 1),
+            "1:01:01 (:3)"
+        );
+        assert_eq!(
+            super::format_history_timestamp(966_666_666, 30, 1),
+            "0:00 (:29)"
+        );
     }
 
     #[test]
@@ -1576,9 +1604,9 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 location2: Loyal Friend's Grave\n");
+        assert_eq!(output, b"0:02 (:0) location2: Loyal Friend's Grave\n");
     }
 
     #[test]
@@ -1587,9 +1615,9 @@ mod tests {
         add_location1(&mut history, 2_000_000_000, "Kin Prefecture".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 location1: Kin Prefecture\n");
+        assert_eq!(output, b"0:02 (:0) location1: Kin Prefecture\n");
     }
 
     #[test]
@@ -1598,9 +1626,9 @@ mod tests {
         add_story(&mut history, 2_000_000_000, "From the darkness".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 story: From the darkness\n");
+        assert_eq!(output, b"0:02 (:0) story: From the darkness\n");
     }
 
     #[test]
@@ -1609,9 +1637,9 @@ mod tests {
         add_combat1(&mut history, 2_000_000_000, "RYUZO".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 combat1: RYUZO\n");
+        assert_eq!(output, b"0:02 (:0) combat1: RYUZO\n");
     }
 
     #[test]
@@ -1620,9 +1648,9 @@ mod tests {
         add_grace(&mut history, 2_000_000_000, "Road to the Manor".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 grace: Road to the Manor\n");
+        assert_eq!(output, b"0:02 (:0) grace: Road to the Manor\n");
     }
 
     #[test]
@@ -1631,9 +1659,9 @@ mod tests {
         add_place(&mut history, 2_000_000_000, "Caria Manor".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"2 place: Caria Manor\n");
+        assert_eq!(output, b"0:02 (:0) place: Caria Manor\n");
     }
 
     #[test]
@@ -1644,11 +1672,11 @@ mod tests {
         add_region(&mut history, 122_000_000_001, "Three Sisters".to_string());
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
         assert_eq!(
             output,
-            b"2 region: Three Sisters\n2:02 region: Three Sisters\n"
+            b"0:02 (:0) region: Three Sisters\n2:02 (:0) region: Three Sisters\n"
         );
     }
 
@@ -1660,11 +1688,11 @@ mod tests {
         add_lost_grace_discovered(&mut history, 122_000_000_001);
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
         assert_eq!(
             output,
-            b"2 lost_grace_discovered\n2:02 lost_grace_discovered\n"
+            b"0:02 (:0) lost_grace_discovered\n2:02 (:0) lost_grace_discovered\n"
         );
     }
 
@@ -1688,11 +1716,11 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        write_history_single_line(&history, &mut output).unwrap();
+        write_history_single_line(&history, &mut output);
 
         assert_eq!(
             output,
-            b"2 boss: Royal Knight Loretta\n2:02 boss: Royal Knight Loretta\n"
+            b"0:02 (:0) boss: Royal Knight Loretta\n2:02 (:0) boss: Royal Knight Loretta\n"
         );
     }
 
