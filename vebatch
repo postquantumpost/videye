@@ -4,17 +4,23 @@
 
 cargo install --path .
 
+n=$(nproc)
+echo running on $n cpus
+
 for f in $*
 do
     echo ''
-    f2=${f%.*}.txt
+    f2long=${f%.*}.txt
+    f2short=${f2long##*/}
+    f2="${f2short}"
     echo process $f to $f2
     if [ -f "$f2" ];then
         echo $f2 already exists
     else
+        #echo ''
         #echo cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
         #cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
-        echo videye --in $f --out $f2 --parallel-count 16 --skip 3
-        videye --in $f --out $f2 --parallel-count 16 --skip 3
+        echo videye --in $f --out $f2 --parallel-count $n --skip 3
+        videye --in $f --out $f2 --parallel-count $n --skip 3
     fi
 done
