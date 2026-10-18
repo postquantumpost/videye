@@ -21,6 +21,6 @@ do
         #echo cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
         #cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
         echo videye --in $f --out $f2 --parallel-count $n --skip 3
-        videye --in $f --out $f2 --parallel-count $n --skip 3
+        time videye --in $f --out $f2 --parallel-count $n --skip 3
     fi
 done

@@ -141,6 +141,33 @@ impl<'cache> OcrSession<'cache> {
         crop: &BoundingBox,
         frame_number: u64,
     ) -> Option<String> {
+        self.recognize_with_validator(
+            frame, frame_width, frame_height, crop, frame_number, is_valid_ocr_text,
+        )
+    }
+
+    pub(crate) fn recognize_item_name(
+        &mut self,
+        frame: &[u8],
+        frame_width: usize,
+        frame_height: usize,
+        crop: &BoundingBox,
+        frame_number: u64,
+    ) -> Option<String> {
+        self.recognize_with_validator(
+            frame, frame_width, frame_height, crop, frame_number, is_valid_item_name,
+        )
+    }
+
+    fn recognize_with_validator(
+        &mut self,
+        frame: &[u8],
+        frame_width: usize,
+        frame_height: usize,
+        crop: &BoundingBox,
+        frame_number: u64,
+        validate: fn(&str) -> bool,
+    ) -> Option<String> {
         let text = ocr_result_or_empty(
             recognize_text_inner(
                 frame,
@@ -155,8 +182,20 @@ impl<'cache> OcrSession<'cache> {
         )
         .trim()
         .to_string();
-        (is_valid_ocr_text(&text) && !text.trim().is_empty()).then_some(text)
+        (validate(&text) && !text.is_empty()).then_some(text)
     }
+}
+
+fn is_valid_item_name(text: &str) -> bool {
+    text.chars().all(|character| {
+        character.is_alphanumeric()
+            || matches!(
+                character,
+                ' ' | ',' | '-' | '\'' | '[' | ']'
+                    | '\u{0300}'..='\u{036f}' | '\u{2010}'..='\u{2015}'
+                    | '\u{2018}' | '\u{2019}'
+            )
+    })
 }
 
 fn is_valid_ocr_text(text: &str) -> bool {
@@ -539,5 +578,37 @@ mod tests {
         assert!(!is_valid_ocr_text("West-E"));
         assert!(!is_valid_ocr_text("Liurnia."));
         assert!(!is_valid_ocr_text("Café"));
+    }
+
+    #[test]
+    fn item_names_have_a_separate_utf8_character_set() {
+        for name in [
+            "Lizard Greatsword",
+            "Grave Glovewort [5]",
+            "Cafe\u{301}, Epee-2",
+            "\u{00c9}p\u{00e9}e d\u{2019}acier\u{2014}3",
+        ] {
+            assert!(super::is_valid_item_name(name), "{name}");
+        }
+        for name in ["Sword!", "Sword/Shield", "Sword\nShield", "Sword\u{fffd}"] {
+            assert!(!super::is_valid_item_name(name), "{name}");
+        }
+        let frame = vec![127; 20 * 5 * 4];
+        let crop = BoundingBox {
+            left: 0,
+            top: 0,
+            width: 20,
+            height: 5,
+        };
+        let cache = OcrCache::default();
+        let key = ocr_cache_key_rgba(&frame, 20, &crop, 5);
+        let name = "\u{00c9}p\u{00e9}e, d'acier [5]-2";
+        cache.insert(20, 5, key, vec![127; 20 * 5 * 3], name.to_string());
+        let mut session = OcrSession::new(true, &cache);
+        assert_eq!(session.recognize(&frame, 20, 5, &crop, 1), None);
+        assert_eq!(
+            session.recognize_item_name(&frame, 20, 5, &crop, 1).as_deref(),
+            Some(name)
+        );
     }
 }

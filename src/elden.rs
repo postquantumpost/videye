@@ -26,6 +26,87 @@ pub(crate) struct Region2Detection {
     pub(crate) text: BoundingBox,
 }
 
+pub(crate) struct NewItemDetection {
+    pub(crate) lines: [BoundingBox; 3],
+    pub(crate) label: BoundingBox,
+    pub(crate) name: BoundingBox,
+}
+
+pub(crate) fn find_newitem_detection(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<NewItemDetection> {
+    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
+    if width < 100 || height < 100 || frame.len() < expected_len {
+        return None;
+    }
+    let radius = (height / 500).max(2);
+    let offset = (height * 6 / 1_000).max(2);
+    let left = width * 42 / 100;
+    let span = width * 16 / 100;
+    let mut lines = Vec::with_capacity(3);
+    for (index, fraction) in [571, 632, 810].into_iter().enumerate() {
+        let expected_y = height * fraction / 1_000;
+        let mut best = None;
+        for y in expected_y.saturating_sub(radius)..=expected_y + radius {
+            if y < offset || y + offset >= height {
+                continue;
+            }
+            let mut support = 0;
+            for sample in 0..64 {
+                let column = left + sample * span / 64;
+                let pixel = (y * width + column) * 4;
+                let channels = &frame[pixel..pixel + 3];
+                let minimum = *channels.iter().min()?;
+                let maximum = *channels.iter().max()?;
+                let gray = channels.iter().map(|value| u32::from(*value)).sum::<u32>() / 3;
+                if minimum < 40 || maximum > 190 || maximum - minimum > 40 {
+                    continue;
+                }
+                let dark = |row| {
+                    let pixel = (row * width + column) * 4;
+                    let luma = frame[pixel..pixel + 3]
+                        .iter()
+                        .map(|value| u32::from(*value))
+                        .sum::<u32>() / 3;
+                    luma <= 90 && gray >= luma + 10
+                };
+                if (index == 0 || dark(y - offset)) && (index == 2 || dark(y + offset)) {
+                    support += 1;
+                }
+            }
+            if support >= 48 && best.is_none_or(|(_, previous)| support > previous) {
+                best = Some((y, support));
+            }
+        }
+        let (top, _) = best?;
+        lines.push(BoundingBox {
+            left,
+            top,
+            width: span,
+            height: 1,
+        });
+    }
+    let name_top = lines[0].top + height * 30 / 1_000;
+    let name_bottom = lines[1].top.checked_sub((height * 4 / 1_000).max(1))?;
+    Some(NewItemDetection {
+        label: BoundingBox {
+            left: width * 47 / 100,
+            top: lines[0].top + height * 8 / 1_000,
+            width: width * 6 / 100,
+            height: (height * 22 / 1_000).max(5),
+        },
+        name: BoundingBox {
+            left: width * 39 / 100,
+            top: name_top,
+            width: width * 23 / 100,
+            height: name_bottom.checked_sub(name_top)?,
+        },
+        lines: lines.try_into().ok()?,
+    })
+}
+
 struct OrangeComponent {
     bounds: BoundingBox,
     pixels: Vec<(usize, usize)>,
@@ -934,6 +1015,44 @@ mod tests {
         find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
         find_place_detection, find_region2_detection,
     };
+
+    #[test]
+    fn newitem_requires_three_lines_with_inward_dark_sides() {
+        for (width, height) in [(480, 270), (1_920, 1_080)] {
+            let mut frame = vec![20; width * height * 4];
+            let positions = [571, 632, 810].map(|fraction| height * fraction / 1_000);
+            let offset = (height * 6 / 1_000).max(2);
+            for (index, top) in positions.into_iter().enumerate() {
+                for column in width * 42 / 100..width * 58 / 100 {
+                    set_pixel(&mut frame, width, column, top, [100, 100, 100, 255]);
+                    if index != 1 {
+                        let exterior = if index == 0 { top - offset } else { top + offset };
+                        set_pixel(&mut frame, width, column, exterior, [240, 30, 180, 255]);
+                    }
+                }
+            }
+            let detection = super::find_newitem_detection(&frame, width, height).unwrap();
+            assert_eq!(detection.lines.each_ref().map(|line| line.top), positions);
+            assert!(detection.name.top + detection.name.height < positions[1]);
+            for top in positions {
+                let mut missing = frame.clone();
+                for column in width * 42 / 100..width * 58 / 100 {
+                    set_pixel(&mut missing, width, column, top, [20, 20, 20, 255]);
+                }
+                assert!(super::find_newitem_detection(&missing, width, height).is_none());
+            }
+            for (index, direction) in [(0, 1isize), (1, -1), (1, 1), (2, -1)] {
+                let mut incorrect = frame.clone();
+                let row = positions[index].checked_add_signed(direction * offset as isize).unwrap();
+                for column in width * 42 / 100..width * 58 / 100 {
+                    set_pixel(&mut incorrect, width, column, row, [240, 30, 180, 255]);
+                }
+                assert!(super::find_newitem_detection(&incorrect, width, height).is_none());
+            }
+            assert!(super::find_newitem_detection(&frame[..10], width, height).is_none());
+        }
+        assert!(super::find_newitem_detection(&[], 0, 0).is_none());
+    }
 
     #[test]
     fn finds_the_scaled_grace_box_and_label_crop() {

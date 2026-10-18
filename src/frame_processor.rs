@@ -1,6 +1,6 @@
 use crate::elden::{
     find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-    find_place_detection, find_region2_detection,
+    find_newitem_detection, find_place_detection, find_region2_detection,
 };
 use crate::ghost::{
     find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
@@ -100,6 +100,12 @@ pub(crate) struct Boss {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NewItem {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HistoryEntry {
     TextAct(TextAct),
     Location1(Location1),
@@ -111,6 +117,7 @@ pub(crate) enum HistoryEntry {
     LostGraceDiscovered(LostGraceDiscovered),
     Region(Region),
     Boss(Boss),
+    NewItem(NewItem),
 }
 
 pub(crate) type History = Vec<HistoryEntry>;
@@ -130,11 +137,12 @@ enum EldenDetector {
     Place,
     LostGraceDiscovered,
     Boss,
+    NewItem,
 }
 
 pub(crate) struct DetectorPriority {
     order: Mutex<[Detector; 5]>,
-    elden_order: Mutex<[EldenDetector; 4]>,
+    elden_order: Mutex<[EldenDetector; 5]>,
 }
 
 impl Default for DetectorPriority {
@@ -152,6 +160,7 @@ impl Default for DetectorPriority {
                 EldenDetector::Place,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::Boss,
+                EldenDetector::NewItem,
             ]),
         }
     }
@@ -169,7 +178,7 @@ impl DetectorPriority {
         }
     }
 
-    fn elden_order(&self) -> [EldenDetector; 4] {
+    fn elden_order(&self) -> [EldenDetector; 5] {
         *self
             .elden_order
             .lock()
@@ -253,6 +262,15 @@ pub(crate) fn process_frame(
                         elapsed_ns,
                     )?,
                     EldenDetector::Boss => process_boss_detector(
+                        state,
+                        frame,
+                        output_file,
+                        &mut annotated_frame,
+                        ocr_session,
+                        history,
+                        elapsed_ns,
+                    )?,
+                    EldenDetector::NewItem => process_newitem_detector(
                         state,
                         frame,
                         output_file,
@@ -556,6 +574,56 @@ fn process_boss_detector(
         return Ok(false);
     }
     add_boss(history, elapsed_ns, name);
+    Ok(true)
+}
+
+fn process_newitem_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let Some(detection) = find_newitem_detection(frame, state.frame_width, state.frame_height) else {
+        return Ok(false);
+    };
+    if state.verbose {
+        writeln!(
+            output_file,
+            "Newitem separators: y={}, {}, {}",
+            detection.lines[0].top, detection.lines[1].top, detection.lines[2].top
+        )?;
+    }
+    if ocr_session.recognize(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &detection.label,
+        state.current_frame,
+    ).as_deref() != Some("NEW") {
+        return Ok(false);
+    }
+    let Some(name) = ocr_session.recognize_item_name(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &detection.name,
+        state.current_frame,
+    ) else {
+        return Ok(false);
+    };
+    if let Some(annotated_frame) = annotated_frame {
+        for line in &detection.lines {
+            for column in line.left..line.left + line.width {
+                set_red_pixel(annotated_frame, state.frame_width, column, line.top);
+            }
+        }
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.label);
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.name);
+    }
+    add_newitem_with_window(history, elapsed_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
     Ok(true)
 }
 
@@ -886,7 +954,7 @@ fn add_textact_with_window(
         HistoryEntry::Place(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) => false,
+        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::TextAct(TextAct {
@@ -917,7 +985,7 @@ fn add_location2_with_window(
         HistoryEntry::Place(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) => false,
+        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
         HistoryEntry::Location2(previous) => {
             previous.location2 == location2
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns
@@ -954,7 +1022,7 @@ fn add_location1_with_window(
         HistoryEntry::Place(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) => false,
+        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Location1(Location1 {
@@ -988,7 +1056,8 @@ fn add_story_with_window(
         | HistoryEntry::Place(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
-        | HistoryEntry::Boss(_) => false,
+        | HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Story(Story { timestamp_ns, text }));
@@ -1019,7 +1088,8 @@ fn add_combat1_with_window(
         | HistoryEntry::Place(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
-        | HistoryEntry::Boss(_) => false,
+        | HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Combat1(Combat1 { timestamp_ns, text }));
@@ -1050,7 +1120,8 @@ fn add_grace_with_window(
         | HistoryEntry::Place(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
-        | HistoryEntry::Boss(_) => false,
+        | HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Grace(Grace { timestamp_ns, name }));
@@ -1081,7 +1152,8 @@ fn add_place_with_window(
         | HistoryEntry::Grace(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
-        | HistoryEntry::Boss(_) => false,
+        | HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Place(Place { timestamp_ns, name }));
@@ -1112,6 +1184,7 @@ fn add_region_with_window(
         | HistoryEntry::Grace(_)
         | HistoryEntry::Place(_)
         | HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_)
         | HistoryEntry::LostGraceDiscovered(_) => false,
     });
     if !is_duplicate {
@@ -1158,6 +1231,22 @@ fn add_boss_with_window(
     });
     if !is_duplicate {
         history.push(HistoryEntry::Boss(Boss { timestamp_ns, name }));
+    }
+}
+
+fn add_newitem_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    name: String,
+    dedupe_window_ns: u128,
+) {
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::NewItem(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::NewItem(NewItem { timestamp_ns, name }));
     }
 }
 
@@ -1216,6 +1305,9 @@ pub(crate) fn merge_history(
             }
             HistoryEntry::Boss(boss) => {
                 add_boss_with_window(history, boss.timestamp_ns, boss.name, dedupe_window_ns)
+            }
+            HistoryEntry::NewItem(item) => {
+                add_newitem_with_window(history, item.timestamp_ns, item.name, dedupe_window_ns)
             }
         }
     }
@@ -1344,6 +1436,18 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 )?;
                 writeln!(output_file, "Boss: {}", boss.name)?;
             }
+            HistoryEntry::NewItem(item) => {
+                let elapsed_seconds = item.timestamp_ns / 1_000_000_000;
+                let hours = elapsed_seconds / 3_600;
+                let minutes = (elapsed_seconds / 60) % 60;
+                let seconds = elapsed_seconds % 60;
+                let nanoseconds = item.timestamp_ns % 1_000_000_000;
+                writeln!(
+                    output_file,
+                    "Newitem at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+                )?;
+                writeln!(output_file, "Newitem: {}", item.name)?;
+            }
         }
     }
     Ok(())
@@ -1428,6 +1532,11 @@ pub(crate) fn write_history_single_line(
                 let timestamp =
                     format_history_timestamp(boss.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} boss: {}", boss.name)?;
+            }
+            HistoryEntry::NewItem(item) => {
+                let timestamp =
+                    format_history_timestamp(item.timestamp_ns, frame_rate_num, frame_rate_den);
+                writeln!(output_file, "{timestamp} newitem: {}", item.name)?;
             }
         }
     }
@@ -1528,6 +1637,7 @@ mod tests {
                 EldenDetector::Grace,
                 EldenDetector::Place,
                 EldenDetector::LostGraceDiscovered,
+                EldenDetector::NewItem,
             ]
         );
         assert_eq!(
@@ -1855,6 +1965,7 @@ mod tests {
                 }
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
+                HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
             })
             .collect();
         assert_eq!(
@@ -1893,6 +2004,7 @@ mod tests {
                 }
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
+                HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
             })
             .collect();
         assert_eq!(stories, vec!["From the darkness", "From the darkness"]);
@@ -1932,6 +2044,7 @@ mod tests {
                 }
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
+                HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
             })
             .collect();
         assert_eq!(
@@ -1962,6 +2075,7 @@ mod tests {
                 }
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
+                HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
             })
             .collect();
         assert_eq!(locations, vec!["Kin Prefecture", "Kin Prefecture"]);
@@ -1981,6 +2095,101 @@ mod tests {
         merge_history(&mut history, frame_history, 10_000_000_000);
 
         assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn newitem_history_preserves_utf8_and_uses_the_dedupe_window() {
+        let name = "\u{00c9}p\u{00e9}e, d'acier [5]-2";
+        let entry = |timestamp_ns| HistoryEntry::NewItem(super::NewItem {
+            timestamp_ns,
+            name: name.to_string(),
+        });
+        let mut history = vec![entry(0)];
+        merge_history(&mut history, vec![entry(5_000_000_000)], 10_000_000_000);
+        merge_history(&mut history, vec![entry(11_000_000_000)], 10_000_000_000);
+        assert_eq!(history.len(), 2);
+        let mut output = Vec::new();
+        write_history_single_line(&history, &mut output);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("0:00 (:0) newitem: {name}\n0:11 (:0) newitem: {name}\n")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local samples/lizard.png, FFmpeg, and Tesseract"]
+    fn newitem_from_lizard_png() {
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/lizard.png"))
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}", String::from_utf8_lossy(&output.stderr)
+        );
+        let (width, height) = (3_840, 2_160);
+        let frame = output.stdout;
+        assert_eq!(frame.len(), width * height * 4);
+        let detection = super::find_newitem_detection(&frame, width, height)
+            .expect("three separator lines");
+        for use_library in [true, false] {
+            let cache = crate::ocr_support::OcrCache::default();
+            let mut session = crate::ocr_support::OcrSession::new(use_library, &cache);
+            assert_eq!(
+                session.recognize(&frame, width, height, &detection.label, 1).as_deref(),
+                Some("NEW")
+            );
+            assert_eq!(
+                session.recognize_item_name(&frame, width, height, &detection.name, 1).as_deref(),
+                Some("Lizard Greatsword")
+            );
+            let mut state = super::ProcessingState {
+                game: super::Game::EldenRing,
+                current_frame: 0,
+                frame_width: width,
+                frame_height: height,
+                frame_size: frame.len(),
+                frame_rate_num: 30,
+                frame_rate_den: 1,
+                check_story_line_thickness: false,
+                verbose: false,
+            };
+            let mut history = Vec::new();
+            super::process_frame(
+                &mut state,
+                &frame,
+                &mut Vec::new(),
+                true,
+                &mut session,
+                &mut crate::ghost::DetectorScratch::default(),
+                &super::DetectorPriority::default(),
+                &mut history,
+            ).unwrap();
+            assert_eq!(
+                history,
+                vec![HistoryEntry::NewItem(super::NewItem {
+                    timestamp_ns: 0,
+                    name: "Lizard Greatsword".to_string(),
+                })]
+            );
+
+            let mut without_new = frame.clone();
+            for row in detection.label.top..detection.label.top + detection.label.height {
+                for column in detection.label.left..detection.label.left + detection.label.width {
+                    let pixel = (row * width + column) * 4;
+                    without_new[pixel..pixel + 4].copy_from_slice(&[20, 20, 20, 255]);
+                }
+            }
+            assert!(super::find_newitem_detection(&without_new, width, height).is_some());
+            let mut history = Vec::new();
+            assert!(!super::process_newitem_detector(
+                &state, &without_new, &mut Vec::new(), &mut None,
+                &mut session, &mut history, 0,
+            ).unwrap());
+            assert!(history.is_empty());
+        }
     }
 
     #[test]
