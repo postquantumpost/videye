@@ -1,6 +1,7 @@
 use crate::elden::{
     find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-    find_newitem_detection, find_place_detection, find_region2_detection,
+    find_newitem_detection, find_place2_detection, find_place3_detection, find_place_detection,
+    find_region2_detection, place_banner_text_image, PlaceBannerDetection,
 };
 use crate::ghost::{
     find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
@@ -83,6 +84,18 @@ pub(crate) struct Place {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Place2 {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Place3 {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Region {
     timestamp_ns: u128,
     name: String,
@@ -114,6 +127,8 @@ pub(crate) enum HistoryEntry {
     Combat1(Combat1),
     Grace(Grace),
     Place(Place),
+    Place2(Place2),
+    Place3(Place3),
     LostGraceDiscovered(LostGraceDiscovered),
     Region(Region),
     Boss(Boss),
@@ -134,6 +149,8 @@ enum Detector {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EldenDetector {
     Grace,
+    Place2,
+    Place3,
     Place,
     LostGraceDiscovered,
     Boss,
@@ -142,7 +159,7 @@ enum EldenDetector {
 
 pub(crate) struct DetectorPriority {
     order: Mutex<[Detector; 5]>,
-    elden_order: Mutex<[EldenDetector; 5]>,
+    elden_order: Mutex<[EldenDetector; 7]>,
 }
 
 impl Default for DetectorPriority {
@@ -157,6 +174,8 @@ impl Default for DetectorPriority {
             ]),
             elden_order: Mutex::new([
                 EldenDetector::Grace,
+                EldenDetector::Place2,
+                EldenDetector::Place3,
                 EldenDetector::Place,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::Boss,
@@ -178,7 +197,7 @@ impl DetectorPriority {
         }
     }
 
-    fn elden_order(&self) -> [EldenDetector; 5] {
+    fn elden_order(&self) -> [EldenDetector; 7] {
         *self
             .elden_order
             .lock()
@@ -235,6 +254,24 @@ pub(crate) fn process_frame(
             for detector in detector_priority.elden_order() {
                 let detector_matched = match detector {
                     EldenDetector::Grace => process_grace_detector(
+                        state,
+                        frame,
+                        output_file,
+                        &mut annotated_frame,
+                        ocr_session,
+                        history,
+                        elapsed_ns,
+                    )?,
+                    EldenDetector::Place2 => process_place2_detector(
+                        state,
+                        frame,
+                        output_file,
+                        &mut annotated_frame,
+                        ocr_session,
+                        history,
+                        elapsed_ns,
+                    )?,
+                    EldenDetector::Place3 => process_place3_detector(
                         state,
                         frame,
                         output_file,
@@ -439,6 +476,111 @@ fn process_place_detector(
         return Ok(false);
     }
     add_place(history, elapsed_ns, name);
+    Ok(true)
+}
+
+fn process_place2_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let detection = find_place2_detection(frame, state.frame_width, state.frame_height);
+    process_place_banner(
+        state,
+        frame,
+        output_file,
+        annotated_frame,
+        ocr_session,
+        history,
+        elapsed_ns,
+        detection,
+        "Place2",
+        add_place2,
+    )
+}
+
+fn process_place3_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let detection = find_place3_detection(frame, state.frame_width, state.frame_height);
+    process_place_banner(
+        state,
+        frame,
+        output_file,
+        annotated_frame,
+        ocr_session,
+        history,
+        elapsed_ns,
+        detection,
+        "Place3",
+        add_place3,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_place_banner(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+    detection: Option<PlaceBannerDetection>,
+    title: &str,
+    add_entry: fn(&mut History, u128, String),
+) -> io::Result<bool> {
+    let Some(detection) = detection else {
+        return Ok(false);
+    };
+    let text_image = place_banner_text_image(frame, state.frame_width, &detection);
+    let Some(recognized_text) = ocr_session.recognize(
+        &text_image,
+        detection.text.width,
+        detection.text.height,
+        &BoundingBox {
+            left: 0,
+            top: 0,
+            width: detection.text.width,
+            height: detection.text.height,
+        },
+        state.current_frame,
+    ) else {
+        return Ok(false);
+    };
+    let name = normalize_place_name(&recognized_text);
+    if name.is_empty() {
+        return Ok(false);
+    }
+
+    if let Some(annotated_frame) = annotated_frame {
+        for x in detection.line.left..detection.line.left + detection.line.width {
+            set_red_pixel(annotated_frame, state.frame_width, x, detection.line.top);
+        }
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.text);
+    }
+    if state.verbose {
+        writeln!(
+            output_file,
+            "{} banner: top={} underline={} text x={} width={}",
+            title,
+            detection.banner.top,
+            detection.line.top,
+            detection.text.left,
+            detection.text.width
+        )?;
+    }
+    add_entry(history, elapsed_ns, name);
     Ok(true)
 }
 
@@ -951,7 +1093,7 @@ fn add_textact_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) => false,
+        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -982,7 +1124,7 @@ fn add_location2_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) => false,
+        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -1019,7 +1161,7 @@ fn add_location1_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) => false,
+        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -1054,6 +1196,8 @@ fn add_story_with_window(
         | HistoryEntry::Combat1(_)
         | HistoryEntry::Grace(_)
         | HistoryEntry::Place(_)
+        | HistoryEntry::Place2(_)
+        | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
@@ -1086,6 +1230,8 @@ fn add_combat1_with_window(
         | HistoryEntry::Story(_)
         | HistoryEntry::Grace(_)
         | HistoryEntry::Place(_)
+        | HistoryEntry::Place2(_)
+        | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
@@ -1118,6 +1264,8 @@ fn add_grace_with_window(
         | HistoryEntry::Story(_)
         | HistoryEntry::Combat1(_)
         | HistoryEntry::Place(_)
+        | HistoryEntry::Place2(_)
+        | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
@@ -1138,25 +1286,53 @@ fn add_place_with_window(
     name: String,
     dedupe_window_ns: u128,
 ) {
-
-    let is_duplicate = history.iter().any(|entry| match entry {
-        HistoryEntry::Place(previous) => {
-            previous.name == name
-                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns
-        }
-        HistoryEntry::TextAct(_)
-        | HistoryEntry::Location1(_)
-        | HistoryEntry::Location2(_)
-        | HistoryEntry::Story(_)
-        | HistoryEntry::Combat1(_)
-        | HistoryEntry::Grace(_)
-        | HistoryEntry::LostGraceDiscovered(_)
-        | HistoryEntry::Region(_)
-        | HistoryEntry::Boss(_)
-        | HistoryEntry::NewItem(_) => false,
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::Place(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
     });
     if !is_duplicate {
         history.push(HistoryEntry::Place(Place { timestamp_ns, name }));
+    }
+}
+
+fn add_place2(history: &mut History, timestamp_ns: u128, name: String) {
+    add_place2_with_window(history, timestamp_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
+}
+
+fn add_place2_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    name: String,
+    dedupe_window_ns: u128,
+) {
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::Place2(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Place2(Place2 { timestamp_ns, name }));
+    }
+}
+
+fn add_place3(history: &mut History, timestamp_ns: u128, name: String) {
+    add_place3_with_window(history, timestamp_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
+}
+
+fn add_place3_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    name: String,
+    dedupe_window_ns: u128,
+) {
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::Place3(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Place3(Place3 { timestamp_ns, name }));
     }
 }
 
@@ -1183,6 +1359,8 @@ fn add_region_with_window(
         | HistoryEntry::Combat1(_)
         | HistoryEntry::Grace(_)
         | HistoryEntry::Place(_)
+        | HistoryEntry::Place2(_)
+        | HistoryEntry::Place3(_)
         | HistoryEntry::Boss(_)
         | HistoryEntry::NewItem(_)
         | HistoryEntry::LostGraceDiscovered(_) => false,
@@ -1297,6 +1475,12 @@ pub(crate) fn merge_history(
             HistoryEntry::Place(place) => {
                 add_place_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
             }
+            HistoryEntry::Place2(place) => {
+                add_place2_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
+            }
+            HistoryEntry::Place3(place) => {
+                add_place3_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
+            }
             HistoryEntry::LostGraceDiscovered(event) => {
                 add_lost_grace_discovered_with_window(history, event.timestamp_ns, dedupe_window_ns)
             }
@@ -1311,6 +1495,24 @@ pub(crate) fn merge_history(
             }
         }
     }
+}
+
+fn write_place_verbose(
+    output_file: &mut File,
+    title: &str,
+    timestamp_ns: u128,
+    name: &str,
+) -> io::Result<()> {
+    let elapsed_seconds = timestamp_ns / 1_000_000_000;
+    let hours = elapsed_seconds / 3_600;
+    let minutes = (elapsed_seconds / 60) % 60;
+    let seconds = elapsed_seconds % 60;
+    let nanoseconds = timestamp_ns % 1_000_000_000;
+    writeln!(
+        output_file,
+        "{title} at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
+    )?;
+    writeln!(output_file, "{title}: {name}")
 }
 
 pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Result<()> {
@@ -1390,16 +1592,13 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 writeln!(output_file, "Grace: {}", grace.name)?;
             }
             HistoryEntry::Place(place) => {
-                let elapsed_seconds = place.timestamp_ns / 1_000_000_000;
-                let hours = elapsed_seconds / 3_600;
-                let minutes = (elapsed_seconds / 60) % 60;
-                let seconds = elapsed_seconds % 60;
-                let nanoseconds = place.timestamp_ns % 1_000_000_000;
-                writeln!(
-                    output_file,
-                    "Place at {hours:02}:{minutes:02}:{seconds:02}.{nanoseconds:09}"
-                )?;
-                writeln!(output_file, "Place: {}", place.name)?;
+                write_place_verbose(output_file, "Place", place.timestamp_ns, &place.name)?;
+            }
+            HistoryEntry::Place2(place) => {
+                write_place_verbose(output_file, "Place2", place.timestamp_ns, &place.name)?;
+            }
+            HistoryEntry::Place3(place) => {
+                write_place_verbose(output_file, "Place3", place.timestamp_ns, &place.name)?;
             }
             HistoryEntry::LostGraceDiscovered(event) => {
                 let elapsed_seconds = event.timestamp_ns / 1_000_000_000;
@@ -1518,6 +1717,16 @@ pub(crate) fn write_history_single_line(
                     format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
                 writeln!(output_file, "{timestamp} place: {}", place.name)?;
             }
+            HistoryEntry::Place2(place) => {
+                let timestamp =
+                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
+                writeln!(output_file, "{timestamp} place2: {}", place.name)?;
+            }
+            HistoryEntry::Place3(place) => {
+                let timestamp =
+                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
+                writeln!(output_file, "{timestamp} place3: {}", place.name)?;
+            }
             HistoryEntry::LostGraceDiscovered(event) => {
                 let timestamp =
                     format_history_timestamp(event.timestamp_ns, frame_rate_num, frame_rate_den);
@@ -1588,7 +1797,7 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 mod tests {
     use super::{
         add_boss, add_combat1, add_grace, add_location1, add_location2, add_lost_grace_discovered,
-        add_place, add_region, add_story, add_textact, merge_history, BoundingBox, Detector,
+        add_place, add_place2, add_place3, add_region, add_story, add_textact, merge_history, BoundingBox, Detector,
         DetectorPriority, EldenDetector, HistoryEntry, Place,
     };
 
@@ -1635,6 +1844,8 @@ mod tests {
             [
                 EldenDetector::Boss,
                 EldenDetector::Grace,
+                EldenDetector::Place2,
+                EldenDetector::Place3,
                 EldenDetector::Place,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::NewItem,
@@ -1852,6 +2063,40 @@ mod tests {
     }
 
     #[test]
+    fn writes_place2_and_place3_labels_on_single_lines() {
+        let mut history = Vec::new();
+        add_place2(&mut history, 2_000_000_000, "Limgrave".to_string());
+        add_place3(&mut history, 3_000_000_000, "Church of Elleh".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(
+            output,
+            b"0:02 (:0) place2: Limgrave\n0:03 (:0) place3: Church of Elleh\n"
+        );
+    }
+
+    #[test]
+    fn deduplicates_place_kinds_only_within_the_same_kind() {
+        let mut history = Vec::new();
+        add_place(&mut history, 1_000_000_000, "Limgrave".to_string());
+        add_place2(&mut history, 2_000_000_000, "Limgrave".to_string());
+        add_place3(&mut history, 3_000_000_000, "Limgrave".to_string());
+        add_place2(&mut history, 4_000_000_000, "Limgrave".to_string());
+        add_place3(&mut history, 5_000_000_000, "Limgrave".to_string());
+        add_place(&mut history, 6_000_000_000, "Limgrave".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(
+            output,
+            b"0:01 (:0) place: Limgrave\n0:02 (:0) place2: Limgrave\n0:03 (:0) place3: Limgrave\n"
+        );
+    }
+
+    #[test]
     fn normalizes_place_name_ocr_edge_noise() {
         assert_eq!(
             super::normalize_place_name("A2 Ranni's Rise,   West"),
@@ -1959,7 +2204,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) => panic!("unexpected Place entry"),
+                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place entry")
+                }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
                 }
@@ -1998,7 +2245,9 @@ mod tests {
                 HistoryEntry::Story(story) => story.text.as_str(),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) => panic!("unexpected Place entry"),
+                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place entry")
+                }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
                 }
@@ -2038,7 +2287,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) => panic!("unexpected Place entry"),
+                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place entry")
+                }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
                 }
@@ -2069,7 +2320,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) => panic!("unexpected Place entry"),
+                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place entry")
+                }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
                 }
@@ -2192,6 +2445,150 @@ mod tests {
         }
     }
 
+    fn decode_sample_png(name: &str) -> (Vec<u8>, usize, usize) {
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples").join(name))
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (width, height) = (3_840, 2_160);
+        assert_eq!(output.stdout.len(), width * height * 4);
+        (output.stdout, width, height)
+    }
+
+    fn assert_single_sample_entry(
+        frame: &[u8],
+        width: usize,
+        height: usize,
+        process: impl Fn(
+            &super::ProcessingState,
+            &[u8],
+            &mut crate::ocr_support::OcrSession<'_>,
+            &mut super::History,
+        ) -> std::io::Result<bool>,
+        expected: &HistoryEntry,
+    ) {
+        for use_library in [true, false] {
+            let cache = crate::ocr_support::OcrCache::default();
+            let mut session = crate::ocr_support::OcrSession::new(use_library, &cache);
+            let state = super::ProcessingState {
+                game: super::Game::EldenRing,
+                current_frame: 0,
+                frame_width: width,
+                frame_height: height,
+                frame_size: frame.len(),
+                frame_rate_num: 30,
+                frame_rate_den: 1,
+                check_story_line_thickness: false,
+                verbose: false,
+            };
+            let mut history = Vec::new();
+            assert!(process(&state, frame, &mut session, &mut history).unwrap());
+            assert_eq!(history.len(), 1);
+            assert_eq!(&history[0], expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local samples/limgrave.png, FFmpeg, and Tesseract"]
+    fn place2_from_limgrave_png() {
+        let (frame, width, height) = decode_sample_png("limgrave.png");
+        let detection = super::find_place2_detection(&frame, width, height).expect("place2 banner");
+        assert!(detection.line.top.abs_diff(1_156) <= 2);
+        assert_single_sample_entry(
+            &frame,
+            width,
+            height,
+            |state, frame, session, history| {
+                super::process_place2_detector(
+                    state,
+                    frame,
+                    &mut Vec::new(),
+                    &mut None,
+                    session,
+                    history,
+                    0,
+                )
+            },
+            &HistoryEntry::Place2(super::Place2 {
+                timestamp_ns: 0,
+                name: "Limgrave".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local samples/elleh_g.png, FFmpeg, and Tesseract"]
+    fn grace_from_elleh_png() {
+        let (frame, width, height) = decode_sample_png("elleh_g.png");
+        let detection = super::find_grace_detection(&frame, width, height).expect("grace box");
+        assert!(detection.symbol.left.abs_diff(101) <= 3);
+        assert!(detection.symbol.top.abs_diff(253) <= 3);
+        assert_single_sample_entry(
+            &frame,
+            width,
+            height,
+            |state, frame, session, history| {
+                super::process_grace_detector(
+                    state,
+                    frame,
+                    &mut Vec::new(),
+                    &mut None,
+                    session,
+                    history,
+                    0,
+                )
+            },
+            &HistoryEntry::Grace(super::Grace {
+                timestamp_ns: 0,
+                name: "Church of Elleh".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local samples/elleh_p.png, FFmpeg, and Tesseract"]
+    fn place3_from_elleh_png() {
+        let (frame, width, height) = decode_sample_png("elleh_p.png");
+        assert!(super::find_place2_detection(&frame, width, height).is_none());
+        let detection = super::find_place3_detection(&frame, width, height).expect("place3 banner");
+        assert!(detection.line.top.abs_diff(776) <= 3);
+        assert_single_sample_entry(
+            &frame,
+            width,
+            height,
+            |state, frame, session, history| {
+                super::process_place3_detector(
+                    state,
+                    frame,
+                    &mut Vec::new(),
+                    &mut None,
+                    session,
+                    history,
+                    0,
+                )
+            },
+            &HistoryEntry::Place3(super::Place3 {
+                timestamp_ns: 0,
+                name: "Church of Elleh".to_string(),
+            }),
+        );
+    }
+
     #[test]
     fn draws_red_outline_on_copied_frame() {
         let width = 10;
@@ -2211,3 +2608,4 @@ mod tests {
         assert_eq!(&frame[inner_pixel..inner_pixel + 4], &[255, 255, 255, 255]);
     }
 }
+
