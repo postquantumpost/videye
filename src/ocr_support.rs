@@ -8,6 +8,7 @@ use tesseract::{PageSegMode, Tesseract};
 
 const MAX_OCR_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OCR_CACHE_ENTRIES: usize = 2_048;
+const TESSERACT_SILENT_DEBUG_FILE: &str = "/dev/null";
 
 #[derive(Default)]
 struct OcrCacheState {
@@ -121,16 +122,21 @@ enum OcrBackend {
 pub(crate) struct OcrSession<'cache> {
     backend: OcrBackend,
     cache: &'cache OcrCache,
+    verbose: bool,
 }
 
 impl<'cache> OcrSession<'cache> {
-    pub(crate) fn new(use_tesseract_library: bool, cache: &'cache OcrCache) -> Self {
+    pub(crate) fn new(use_tesseract_library: bool, verbose: bool, cache: &'cache OcrCache) -> Self {
         let backend = if use_tesseract_library {
             OcrBackend::Library(None)
         } else {
             OcrBackend::Process
         };
-        Self { backend, cache }
+        Self {
+            backend,
+            cache,
+            verbose,
+        }
     }
 
     pub(crate) fn recognize(
@@ -176,6 +182,7 @@ impl<'cache> OcrSession<'cache> {
                 crop,
                 &mut self.backend,
                 self.cache,
+                self.verbose,
             ),
             frame_number,
             crop,
@@ -225,6 +232,7 @@ fn recognize_text_inner(
     crop: &BoundingBox,
     backend: &mut OcrBackend,
     ocr_cache: &OcrCache,
+    verbose: bool,
 ) -> io::Result<String> {
     if !crop_is_large_enough(crop) {
         return Ok(String::new());
@@ -242,8 +250,10 @@ fn recognize_text_inner(
     }
     let rgb_crop = crop_rgba_to_rgb_with_bounds(frame, frame_width, crop, crop_right, crop_bottom)?;
     let text = match backend {
-        OcrBackend::Process => recognize_text_with_process(&rgb_crop, crop),
-        OcrBackend::Library(engine) => recognize_text_with_library(engine, &rgb_crop, crop),
+        OcrBackend::Process => recognize_text_with_process(&rgb_crop, crop, verbose),
+        OcrBackend::Library(engine) => {
+            recognize_text_with_library(engine, &rgb_crop, crop, verbose)
+        }
     }?;
     if let Some(cache_key) = cache_key {
         ocr_cache.insert(crop.width, crop.height, cache_key, rgb_crop, text.clone());
@@ -294,9 +304,17 @@ fn crop_rgb_len(crop: &BoundingBox) -> io::Result<usize> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "crop dimensions overflow"))
 }
 
-fn recognize_text_with_process(rgb_crop: &[u8], crop: &BoundingBox) -> io::Result<String> {
-    let mut tesseract = Command::new("tesseract")
-        .args(["stdin", "stdout", "--psm", "7"])
+fn recognize_text_with_process(
+    rgb_crop: &[u8],
+    crop: &BoundingBox,
+    verbose: bool,
+) -> io::Result<String> {
+    let mut command = Command::new("tesseract");
+    command.args(["stdin", "stdout", "--psm", "7"]);
+    if !verbose {
+        command.args(["-c", "debug_file=/dev/null"]);
+    }
+    let mut tesseract = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -328,6 +346,7 @@ fn recognize_text_with_library(
     engine: &mut Option<Tesseract>,
     rgb_crop: &[u8],
     crop: &BoundingBox,
+    verbose: bool,
 ) -> io::Result<String> {
     let frame_width = i32::try_from(crop.width)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
@@ -338,8 +357,17 @@ fn recognize_text_with_library(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "OCR crop row is too large"))?;
     let engine_instance = match engine.take() {
         Some(engine_instance) => engine_instance,
-        None => Tesseract::new(None, Some("eng"))
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?,
+        None => {
+            let engine_instance = Tesseract::new(None, Some("eng"))
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+            if verbose {
+                engine_instance
+            } else {
+                engine_instance
+                    .set_variable("debug_file", TESSERACT_SILENT_DEBUG_FILE)
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
+            }
+        }
     };
     let result = (|| {
         let mut engine_instance = engine_instance
@@ -490,7 +518,7 @@ mod tests {
         let key = ocr_cache_key_rgba(&frame, width, &crop, height);
         let cache = OcrCache::default();
         cache.insert(width, height, key, rgb_crop, "cached".to_string());
-        let mut session = OcrSession::new(true, &cache);
+        let mut session = OcrSession::new(true, false, &cache);
 
         assert_eq!(
             session.recognize(&frame, width, height, &crop, 1),
@@ -508,12 +536,12 @@ mod tests {
             height: 5,
         };
         let cache = OcrCache::default();
-        let mut session = OcrSession::new(false, &cache);
+        let mut session = OcrSession::new(false, false, &cache);
         let mut backend = OcrBackend::Process;
 
         assert_eq!(session.recognize(&frame, 5, 5, &crop, 1), None);
         assert!(
-            recognize_text_inner(&frame, 5, 5, &crop, &mut backend, &cache)
+            recognize_text_inner(&frame, 5, 5, &crop, &mut backend, &cache, false)
                 .unwrap()
                 .is_empty()
         );
@@ -604,7 +632,7 @@ mod tests {
         let key = ocr_cache_key_rgba(&frame, 20, &crop, 5);
         let name = "\u{00c9}p\u{00e9}e, d'acier [5]-2";
         cache.insert(20, 5, key, vec![127; 20 * 5 * 3], name.to_string());
-        let mut session = OcrSession::new(true, &cache);
+        let mut session = OcrSession::new(true, false, &cache);
         assert_eq!(session.recognize(&frame, 20, 5, &crop, 1), None);
         assert_eq!(
             session.recognize_item_name(&frame, 20, 5, &crop, 1).as_deref(),

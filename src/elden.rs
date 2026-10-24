@@ -3,9 +3,16 @@ use crate::frame_processor::BoundingBox;
 pub(crate) struct GraceDetection {
     pub(crate) symbol: BoundingBox,
     pub(crate) label: BoundingBox,
+    pub(crate) kind: GraceSymbolKind,
 }
 
-pub(crate) struct PlaceDetection {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraceSymbolKind {
+    Grace,
+    Merchant,
+}
+
+pub(crate) struct Place2Detection {
     pub(crate) line: BoundingBox,
     pub(crate) text: BoundingBox,
 }
@@ -260,15 +267,61 @@ pub(crate) fn find_grace_detection(
     {
         label_width = label_width.min(text_width + label_height / 2);
     }
-    (label_width >= 20 && label_height >= 5).then_some(GraceDetection {
-        symbol,
-        label: BoundingBox {
-            left: label_left,
-            top: label_top,
-            width: label_width,
-            height: label_height,
-        },
+    (label_width >= 20 && label_height >= 5).then(|| {
+        let kind = classify_grace_symbol(frame, width, &symbol);
+        GraceDetection {
+            symbol,
+            label: BoundingBox {
+                left: label_left,
+                top: label_top,
+                width: label_width,
+                height: label_height,
+            },
+            kind,
+        }
     })
+}
+
+fn classify_grace_symbol(frame: &[u8], width: usize, symbol: &BoundingBox) -> GraceSymbolKind {
+    let luma_at = |x: usize, y: usize| {
+        let pixel = (y * width + x) * 4;
+        (299 * u32::from(frame[pixel])
+            + 587 * u32::from(frame[pixel + 1])
+            + 114 * u32::from(frame[pixel + 2]))
+            / 1_000
+    };
+
+    let mut background_luma = 0;
+    let mut background_samples = 0;
+    for y_fraction in [30, 40, 50] {
+        for x_fraction in [15, 20, 80, 85] {
+            background_luma += luma_at(
+                symbol.left + symbol.width * x_fraction / 100,
+                symbol.top + symbol.height * y_fraction / 100,
+            );
+            background_samples += 1;
+        }
+    }
+    let background_luma = background_luma / background_samples;
+    let mut bright_lower_samples = 0;
+    let mut lower_samples = 0;
+    for y_fraction in (55..=85).step_by(5) {
+        for x_fraction in (20..=80).step_by(5) {
+            let luma = luma_at(
+                symbol.left + symbol.width * x_fraction / 100,
+                symbol.top + symbol.height * y_fraction / 100,
+            );
+            bright_lower_samples += u32::from(luma > background_luma + 25);
+            lower_samples += 1;
+        }
+    }
+
+    // Merchants have a broad, bright robe in the lower half; grace icons have only a thin ring.
+    if bright_lower_samples * 3 >= lower_samples {
+        GraceSymbolKind::Merchant
+    } else {
+        GraceSymbolKind::Grace
+    }
 }
 
 /// Returns the width of the grace name measured from the label's left edge, ending at the first
@@ -312,11 +365,11 @@ fn grace_label_text_width(
     last.map(|offset| offset + 1)
 }
 
-pub(crate) fn find_place_detection(
+pub(crate) fn find_place2_detection(
     frame: &[u8],
     width: usize,
     height: usize,
-) -> Option<PlaceDetection> {
+) -> Option<Place2Detection> {
     let expected_len = width.checked_mul(height)?.checked_mul(4)?;
     if width == 0 || height == 0 || frame.len() < expected_len {
         return None;
@@ -334,7 +387,7 @@ pub(crate) fn find_place_detection(
     for y in
         expected_y.saturating_sub(y_radius)..=expected_y.saturating_add(y_radius).min(height - 1)
     {
-        let Some((left, right, support)) = place_line_run(
+        let Some((left, right, support)) = place2_line_run(
             frame,
             width,
             height,
@@ -379,7 +432,7 @@ pub(crate) fn find_place_detection(
     let text_height = (height.saturating_mul(55) / 1_000).max(18).min(line.top);
     let gap = (height.saturating_mul(3) / 1_000).max(1);
     let text_top = line.top.saturating_sub(text_height.saturating_add(gap));
-    (line.width >= 20 && text_top < line.top).then_some(PlaceDetection {
+    (line.width >= 20 && text_top < line.top).then_some(Place2Detection {
         text: BoundingBox {
             left: line.left,
             top: text_top,
@@ -423,7 +476,7 @@ struct BannerLayout {
 }
 
 /// Large region names such as "Limgrave", centered just above the middle of the frame.
-const PLACE2_LAYOUT: BannerLayout = BannerLayout {
+const PLACE1_LAYOUT: BannerLayout = BannerLayout {
     line: 5_352,
     band_height: 843,
     middle: 296,
@@ -447,7 +500,7 @@ const PLACE3_LAYOUT: BannerLayout = BannerLayout {
     text_height: 510,
     descender: 120,
     padding: 200,
-    // The thinner strokes are anti-aliased and peak lower than the large place2 text.
+    // The thinner strokes are anti-aliased and peak lower than the large place1 text.
     min_text_luma: 220,
     columns_left: 3_800,
     columns_right: 6_200,
@@ -457,12 +510,12 @@ const PLACE3_LAYOUT: BannerLayout = BannerLayout {
     banner_right: 6_300,
 };
 
-pub(crate) fn find_place2_detection(
+pub(crate) fn find_place1_detection(
     frame: &[u8],
     width: usize,
     height: usize,
 ) -> Option<PlaceBannerDetection> {
-    find_place_banner(frame, width, height, &PLACE2_LAYOUT)
+    find_place_banner(frame, width, height, &PLACE1_LAYOUT)
 }
 
 pub(crate) fn find_place3_detection(
@@ -1269,7 +1322,7 @@ fn banner_glyph_shape(component: &OrangeComponent, is_l: bool) -> bool {
     }
 }
 
-fn place_line_run(
+fn place2_line_run(
     frame: &[u8],
     width: usize,
     height: usize,
@@ -1284,19 +1337,19 @@ fn place_line_run(
     let mut support = 0;
 
     for x in search_left..search_right.min(width) {
-        if is_place_line_pixel(frame, width, height, x, y) {
+        if is_place2_line_pixel(frame, width, height, x, y) {
             if start.is_none() {
                 start = Some(x);
             }
             last_support = x;
             support += 1;
         } else if start.is_some() && x.saturating_sub(last_support) > allowed_gap {
-            update_place_run(&mut best, start.take()?, last_support, support);
+            update_place2_run(&mut best, start.take()?, last_support, support);
             support = 0;
         }
     }
     if let Some(start) = start {
-        update_place_run(&mut best, start, last_support, support);
+        update_place2_run(&mut best, start, last_support, support);
     }
     best
 }
@@ -1322,12 +1375,12 @@ fn boss_line_run(
             last_support = x;
             support += 1;
         } else if start.is_some() && x.saturating_sub(last_support) > allowed_gap {
-            update_place_run(&mut best, start.take()?, last_support, support);
+            update_place2_run(&mut best, start.take()?, last_support, support);
             support = 0;
         }
     }
     if let Some(start) = start {
-        update_place_run(&mut best, start, last_support, support);
+        update_place2_run(&mut best, start, last_support, support);
     }
     best
 }
@@ -1371,7 +1424,7 @@ fn boss_red_thickness(
     thickness
 }
 
-fn update_place_run(
+fn update_place2_run(
     best: &mut Option<(usize, usize, usize)>,
     start: usize,
     end: usize,
@@ -1382,7 +1435,7 @@ fn update_place_run(
     }
 }
 
-fn is_place_line_pixel(frame: &[u8], width: usize, height: usize, x: usize, y: usize) -> bool {
+fn is_place2_line_pixel(frame: &[u8], width: usize, height: usize, x: usize, y: usize) -> bool {
     if y == 0 || y + 1 >= height {
         return false;
     }
@@ -1576,7 +1629,7 @@ fn is_border_pixel(
 mod tests {
     use super::{
         find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-        find_place2_detection, find_place_detection, find_region2_detection, place_banner_text_image,
+        find_place1_detection, find_place2_detection, find_region2_detection, place_banner_text_image,
     };
 
     #[test]
@@ -1655,6 +1708,38 @@ mod tests {
     }
 
     #[test]
+    fn classifies_merchant_from_broad_bright_lower_symbol() {
+        let width = 100;
+        let height = 100;
+        let symbol = crate::frame_processor::BoundingBox {
+            left: 20,
+            top: 20,
+            width: 60,
+            height: 60,
+        };
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[60, 60, 60, 255]);
+        }
+        assert_eq!(
+            super::classify_grace_symbol(&frame, width, &symbol),
+            super::GraceSymbolKind::Grace
+        );
+
+        for y_fraction in 55..=85 {
+            for x_fraction in 20..=80 {
+                let x = symbol.left + symbol.width * x_fraction / 100;
+                let y = symbol.top + symbol.height * y_fraction / 100;
+                set_pixel(&mut frame, width, x, y, [140, 140, 140, 255]);
+            }
+        }
+        assert_eq!(
+            super::classify_grace_symbol(&frame, width, &symbol),
+            super::GraceSymbolKind::Merchant
+        );
+    }
+
+    #[test]
     fn rejects_frames_without_a_grace_box() {
         let width = 480;
         let height = 300;
@@ -1668,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_scaled_place_underline_and_text_crop() {
+    fn finds_the_scaled_place2_underline_and_text_crop() {
         for (width, height) in [(1_365, 768), (1_920, 1_080)] {
             let expected_y = height * 423 / 1_000;
             let expected_length = width * 272 / 1_000;
@@ -1681,7 +1766,7 @@ mod tests {
                 set_pixel(&mut frame, width, x, expected_y, [150, 150, 150, 255]);
             }
 
-            let detection = find_place_detection(&frame, width, height).unwrap();
+            let detection = find_place2_detection(&frame, width, height).unwrap();
             assert_eq!(detection.line.top, expected_y);
             assert_eq!(detection.line.left, left);
             assert_eq!(detection.line.width, expected_length);
@@ -1690,7 +1775,7 @@ mod tests {
         }
     }
 
-    fn place2_frame(width: usize, height: usize, scene: u8) -> (Vec<u8>, usize, usize) {
+    fn place1_frame(width: usize, height: usize, scene: u8) -> (Vec<u8>, usize, usize) {
         let mut frame = vec![0; width * height * 4];
         for pixel in frame.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[scene, scene, scene, 255]);
@@ -1712,7 +1797,7 @@ mod tests {
         (frame, top, line)
     }
 
-    fn draw_place2_strokes(frame: &mut [u8], width: usize, height: usize, line: usize) {
+    fn draw_place1_strokes(frame: &mut [u8], width: usize, height: usize, line: usize) {
         let stroke = (width / 400).max(2);
         let stroke_top = line - height * 50 / 1_000;
         for index in 0..8 {
@@ -1733,12 +1818,12 @@ mod tests {
     }
 
     #[test]
-    fn finds_place2_banner_from_relative_edges_at_multiple_resolutions() {
+    fn finds_place1_banner_from_relative_edges_at_multiple_resolutions() {
         for (width, height, scene) in [(1_920, 1_080, 140), (3_840, 2_160, 110)] {
-            let (mut frame, top, line) = place2_frame(width, height, scene);
-            draw_place2_strokes(&mut frame, width, height, line);
+            let (mut frame, top, line) = place1_frame(width, height, scene);
+            draw_place1_strokes(&mut frame, width, height, line);
 
-            let detection = find_place2_detection(&frame, width, height).unwrap();
+            let detection = find_place1_detection(&frame, width, height).unwrap();
             assert!(detection.line.top.abs_diff(line) <= 1);
             assert!(detection.banner.top.abs_diff(top) <= height / 200);
             assert_eq!(detection.text_luma, 250);
@@ -1749,32 +1834,32 @@ mod tests {
     }
 
     #[test]
-    fn place2_requires_both_edges_and_fully_bright_text() {
+    fn place1_requires_both_edges_and_fully_bright_text() {
         let (width, height) = (1_920, 1_080);
-        let (frame, _, line) = place2_frame(width, height, 140);
-        assert!(find_place2_detection(&frame, width, height).is_none());
+        let (frame, _, line) = place1_frame(width, height, 140);
+        assert!(find_place1_detection(&frame, width, height).is_none());
 
         let mut faded = frame.clone();
-        draw_place2_strokes(&mut faded, width, height, line);
+        draw_place1_strokes(&mut faded, width, height, line);
         for pixel in faded.chunks_exact_mut(4) {
             if pixel[0] == 250 {
                 pixel[..3].copy_from_slice(&[200, 200, 200]);
             }
         }
-        assert!(find_place2_detection(&faded, width, height).is_none());
+        assert!(find_place1_detection(&faded, width, height).is_none());
 
         let mut no_band = vec![140; width * height * 4];
-        draw_place2_strokes(&mut no_band, width, height, line);
-        assert!(find_place2_detection(&no_band, width, height).is_none());
-        assert!(find_place2_detection(&no_band[..10], width, height).is_none());
+        draw_place1_strokes(&mut no_band, width, height, line);
+        assert!(find_place1_detection(&no_band, width, height).is_none());
+        assert!(find_place1_detection(&no_band[..10], width, height).is_none());
     }
 
     #[test]
     fn place_banner_text_image_keeps_descenders_and_drops_scenery_below_the_band() {
         let (width, height) = (1_920, 1_080);
-        let (mut frame, _, line) = place2_frame(width, height, 140);
-        draw_place2_strokes(&mut frame, width, height, line);
-        let detection = find_place2_detection(&frame, width, height).unwrap();
+        let (mut frame, _, line) = place1_frame(width, height, 140);
+        draw_place1_strokes(&mut frame, width, height, line);
+        let detection = find_place1_detection(&frame, width, height).unwrap();
         let speck = (
             detection.text.left + detection.text.width - 4,
             line + height * 12 / 1_000,
@@ -1792,13 +1877,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_frames_without_a_place_underline() {
+    fn rejects_frames_without_a_place2_underline() {
         let width = 480;
         let height = 300;
         let frame = vec![32; width * height * 4];
 
-        assert!(find_place_detection(&frame, width, height).is_none());
-        assert!(find_place_detection(&frame[..10], width, height).is_none());
+        assert!(find_place2_detection(&frame, width, height).is_none());
+        assert!(find_place2_detection(&frame[..10], width, height).is_none());
     }
 
     #[test]

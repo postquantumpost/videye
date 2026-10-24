@@ -284,7 +284,7 @@ pub fn process_files(
             let check_story_line_thickness = state.check_story_line_thickness;
             let game = state.game;
             worker_handles.push(scope.spawn(move || {
-                let mut ocr_session = OcrSession::new(use_tesseract_library, cache);
+                let mut ocr_session = OcrSession::new(use_tesseract_library, verbose, cache);
                 let mut detector_scratch = DetectorScratch::default();
                 loop {
                     let job = job_receiver

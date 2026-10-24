@@ -1,7 +1,7 @@
 use crate::elden::{
     find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-    find_newitem_detection, find_place2_detection, find_place3_detection, find_place_detection,
-    find_region2_detection, place_banner_text_image, PlaceBannerDetection,
+    find_newitem_detection, find_place1_detection, find_place3_detection, find_place2_detection,
+    find_region2_detection, place_banner_text_image, GraceSymbolKind, PlaceBannerDetection,
 };
 use crate::ghost::{
     find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
@@ -78,13 +78,19 @@ pub(crate) struct Grace {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Place {
+pub(crate) struct Merchant {
     timestamp_ns: u128,
     name: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Place2 {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Place1 {
     timestamp_ns: u128,
     name: String,
 }
@@ -126,8 +132,9 @@ pub(crate) enum HistoryEntry {
     Story(Story),
     Combat1(Combat1),
     Grace(Grace),
-    Place(Place),
+    Merchant(Merchant),
     Place2(Place2),
+    Place1(Place1),
     Place3(Place3),
     LostGraceDiscovered(LostGraceDiscovered),
     Region(Region),
@@ -149,9 +156,9 @@ enum Detector {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EldenDetector {
     Grace,
-    Place2,
+    Place1,
     Place3,
-    Place,
+    Place2,
     LostGraceDiscovered,
     Boss,
     NewItem,
@@ -174,9 +181,9 @@ impl Default for DetectorPriority {
             ]),
             elden_order: Mutex::new([
                 EldenDetector::Grace,
-                EldenDetector::Place2,
+                EldenDetector::Place1,
                 EldenDetector::Place3,
-                EldenDetector::Place,
+                EldenDetector::Place2,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::Boss,
                 EldenDetector::NewItem,
@@ -262,7 +269,7 @@ pub(crate) fn process_frame(
                         history,
                         elapsed_ns,
                     )?,
-                    EldenDetector::Place2 => process_place2_detector(
+                    EldenDetector::Place1 => process_place1_detector(
                         state,
                         frame,
                         output_file,
@@ -280,7 +287,7 @@ pub(crate) fn process_frame(
                         history,
                         elapsed_ns,
                     )?,
-                    EldenDetector::Place => process_place_detector(
+                    EldenDetector::Place2 => process_place2_detector(
                         state,
                         frame,
                         output_file,
@@ -414,9 +421,13 @@ fn process_grace_detector(
         draw_bounding_box(annotated_frame, state.frame_width, &detection.symbol);
     }
     if state.verbose {
+        let label = match detection.kind {
+            GraceSymbolKind::Grace => "Grace",
+            GraceSymbolKind::Merchant => "Merchant",
+        };
         writeln!(
             output_file,
-            "Grace symbol: x={} y={} width={} height={}",
+            "{label} symbol: x={} y={} width={} height={}",
             detection.symbol.left,
             detection.symbol.top,
             detection.symbol.width,
@@ -432,11 +443,14 @@ fn process_grace_detector(
     ) else {
         return Ok(false);
     };
-    add_grace(history, elapsed_ns, name);
+    match detection.kind {
+        GraceSymbolKind::Grace => add_grace(history, elapsed_ns, name),
+        GraceSymbolKind::Merchant => add_merchant(history, elapsed_ns, name),
+    }
     Ok(true)
 }
 
-fn process_place_detector(
+fn process_place2_detector(
     state: &ProcessingState,
     frame: &[u8],
     output_file: &mut impl Write,
@@ -445,7 +459,7 @@ fn process_place_detector(
     history: &mut History,
     elapsed_ns: u128,
 ) -> io::Result<bool> {
-    let Some(detection) = find_place_detection(frame, state.frame_width, state.frame_height) else {
+    let Some(detection) = find_place2_detection(frame, state.frame_width, state.frame_height) else {
         return Ok(false);
     };
 
@@ -457,7 +471,7 @@ fn process_place_detector(
     if state.verbose {
         writeln!(
             output_file,
-            "Place underline: x={} y={} width={}",
+            "Place2 underline: x={} y={} width={}",
             detection.line.left, detection.line.top, detection.line.width
         )?;
     }
@@ -475,11 +489,11 @@ fn process_place_detector(
     if name.is_empty() {
         return Ok(false);
     }
-    add_place(history, elapsed_ns, name);
+    add_place2(history, elapsed_ns, name);
     Ok(true)
 }
 
-fn process_place2_detector(
+fn process_place1_detector(
     state: &ProcessingState,
     frame: &[u8],
     output_file: &mut impl Write,
@@ -488,7 +502,7 @@ fn process_place2_detector(
     history: &mut History,
     elapsed_ns: u128,
 ) -> io::Result<bool> {
-    let detection = find_place2_detection(frame, state.frame_width, state.frame_height);
+    let detection = find_place1_detection(frame, state.frame_width, state.frame_height);
     process_place_banner(
         state,
         frame,
@@ -498,8 +512,8 @@ fn process_place2_detector(
         history,
         elapsed_ns,
         detection,
-        "Place2",
-        add_place2,
+        "Place1",
+        add_place1,
     )
 }
 
@@ -1093,7 +1107,8 @@ fn add_textact_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
+        HistoryEntry::Merchant(_) => false,
+        HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -1124,7 +1139,8 @@ fn add_location2_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
+        HistoryEntry::Merchant(_) => false,
+        HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -1161,7 +1177,8 @@ fn add_location1_with_window(
         HistoryEntry::Story(_) => false,
         HistoryEntry::Combat1(_) => false,
         HistoryEntry::Grace(_) => false,
-        HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => false,
+        HistoryEntry::Merchant(_) => false,
+        HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
         HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
@@ -1195,8 +1212,9 @@ fn add_story_with_window(
         | HistoryEntry::Location2(_)
         | HistoryEntry::Combat1(_)
         | HistoryEntry::Grace(_)
-        | HistoryEntry::Place(_)
+        | HistoryEntry::Merchant(_)
         | HistoryEntry::Place2(_)
+        | HistoryEntry::Place1(_)
         | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
@@ -1229,8 +1247,9 @@ fn add_combat1_with_window(
         | HistoryEntry::Location2(_)
         | HistoryEntry::Story(_)
         | HistoryEntry::Grace(_)
-        | HistoryEntry::Place(_)
+        | HistoryEntry::Merchant(_)
         | HistoryEntry::Place2(_)
+        | HistoryEntry::Place1(_)
         | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
@@ -1263,8 +1282,9 @@ fn add_grace_with_window(
         | HistoryEntry::Location2(_)
         | HistoryEntry::Story(_)
         | HistoryEntry::Combat1(_)
-        | HistoryEntry::Place(_)
+        | HistoryEntry::Merchant(_)
         | HistoryEntry::Place2(_)
+        | HistoryEntry::Place1(_)
         | HistoryEntry::Place3(_)
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
@@ -1276,23 +1296,23 @@ fn add_grace_with_window(
     }
 }
 
-fn add_place(history: &mut History, timestamp_ns: u128, name: String) {
-    add_place_with_window(history, timestamp_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
+fn add_merchant(history: &mut History, timestamp_ns: u128, name: String) {
+    add_merchant_with_window(history, timestamp_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
 }
 
-fn add_place_with_window(
+fn add_merchant_with_window(
     history: &mut History,
     timestamp_ns: u128,
     name: String,
     dedupe_window_ns: u128,
 ) {
     let is_duplicate = history.iter().any(|entry| {
-        matches!(entry, HistoryEntry::Place(previous)
+        matches!(entry, HistoryEntry::Merchant(previous)
             if previous.name == name
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
     });
     if !is_duplicate {
-        history.push(HistoryEntry::Place(Place { timestamp_ns, name }));
+        history.push(HistoryEntry::Merchant(Merchant { timestamp_ns, name }));
     }
 }
 
@@ -1313,6 +1333,26 @@ fn add_place2_with_window(
     });
     if !is_duplicate {
         history.push(HistoryEntry::Place2(Place2 { timestamp_ns, name }));
+    }
+}
+
+fn add_place1(history: &mut History, timestamp_ns: u128, name: String) {
+    add_place1_with_window(history, timestamp_ns, name, DEFAULT_DEDUPE_WINDOW_NS);
+}
+
+fn add_place1_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    name: String,
+    dedupe_window_ns: u128,
+) {
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::Place1(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Place1(Place1 { timestamp_ns, name }));
     }
 }
 
@@ -1358,8 +1398,9 @@ fn add_region_with_window(
         | HistoryEntry::Story(_)
         | HistoryEntry::Combat1(_)
         | HistoryEntry::Grace(_)
-        | HistoryEntry::Place(_)
+        | HistoryEntry::Merchant(_)
         | HistoryEntry::Place2(_)
+        | HistoryEntry::Place1(_)
         | HistoryEntry::Place3(_)
         | HistoryEntry::Boss(_)
         | HistoryEntry::NewItem(_)
@@ -1472,11 +1513,19 @@ pub(crate) fn merge_history(
             HistoryEntry::Grace(grace) => {
                 add_grace_with_window(history, grace.timestamp_ns, grace.name, dedupe_window_ns)
             }
-            HistoryEntry::Place(place) => {
-                add_place_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
+            HistoryEntry::Merchant(merchant) => {
+                add_merchant_with_window(
+                    history,
+                    merchant.timestamp_ns,
+                    merchant.name,
+                    dedupe_window_ns,
+                )
             }
             HistoryEntry::Place2(place) => {
                 add_place2_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
+            }
+            HistoryEntry::Place1(place) => {
+                add_place1_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
             }
             HistoryEntry::Place3(place) => {
                 add_place3_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
@@ -1591,11 +1640,14 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 )?;
                 writeln!(output_file, "Grace: {}", grace.name)?;
             }
-            HistoryEntry::Place(place) => {
-                write_place_verbose(output_file, "Place", place.timestamp_ns, &place.name)?;
+            HistoryEntry::Merchant(merchant) => {
+                write_place_verbose(output_file, "Merchant", merchant.timestamp_ns, &merchant.name)?;
             }
             HistoryEntry::Place2(place) => {
                 write_place_verbose(output_file, "Place2", place.timestamp_ns, &place.name)?;
+            }
+            HistoryEntry::Place1(place) => {
+                write_place_verbose(output_file, "Place1", place.timestamp_ns, &place.name)?;
             }
             HistoryEntry::Place3(place) => {
                 write_place_verbose(output_file, "Place3", place.timestamp_ns, &place.name)?;
@@ -1659,104 +1711,304 @@ pub(crate) fn write_history_single_line(
     frame_rate_num: u32,
     frame_rate_den: u32,
 ) -> io::Result<()> {
+    let has_zero_timestamp_entry = history
+        .iter()
+        .any(|entry| history_entry_timestamp_ns(entry) < 1_000_000_000);
+    let mut previous_real_timestamp_ns = if has_zero_timestamp_entry {
+        None
+    } else {
+        writeln!(output_file, "0:00 begin")?;
+        Some(0)
+    };
+
     for entry in history {
         match entry {
             HistoryEntry::TextAct(textact) => {
-                let timestamp =
-                    format_history_timestamp(textact.timestamp_ns, frame_rate_num, frame_rate_den);
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    textact.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
                 writeln!(
                     output_file,
-                    "{timestamp} act: {}, {}",
-                    textact.actnumber, textact.acttitle
+                    "{timestamp} {}, {} {frame} {}",
+                    textact.actnumber,
+                    textact.acttitle,
+                    superscript_label("act")
                 )?;
             }
             HistoryEntry::Location2(location2) => {
-                let timestamp = format_history_timestamp(
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
                     location2.timestamp_ns,
                     frame_rate_num,
                     frame_rate_den,
+                    &mut previous_real_timestamp_ns,
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} location2: {}",
-                    location2.location2
+                    "{timestamp} {} {frame} {}",
+                    location2.location2,
+                    superscript_label("location2")
                 )?;
             }
             HistoryEntry::Location1(location1) => {
-                let timestamp = format_history_timestamp(
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
                     location1.timestamp_ns,
                     frame_rate_num,
                     frame_rate_den,
+                    &mut previous_real_timestamp_ns,
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} location1: {}",
-                    location1.location1
+                    "{timestamp} {} {frame} {}",
+                    location1.location1,
+                    superscript_label("location1")
                 )?;
             }
             HistoryEntry::Story(story) => {
-                let timestamp =
-                    format_history_timestamp(story.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} story: {}", story.text)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    story.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp} {} {frame} {}",
+                    story.text,
+                    superscript_label("story")
+                )?;
             }
             HistoryEntry::Combat1(combat1) => {
-                let timestamp = format_history_timestamp(
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
                     combat1.timestamp_ns,
                     frame_rate_num,
                     frame_rate_den,
+                    &mut previous_real_timestamp_ns,
                 );
-                writeln!(output_file, "{timestamp} combat1: {}", combat1.text)?;
+                writeln!(
+                    output_file,
+                    "{timestamp} {} {frame} {}",
+                    combat1.text,
+                    superscript_label("combat1")
+                )?;
             }
             HistoryEntry::Grace(grace) => {
-                let timestamp =
-                    format_history_timestamp(grace.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} grace: {}", grace.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    grace.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}       {} {frame} {}",
+                    grace.name,
+                    superscript_label("grace")
+                )?;
             }
-            HistoryEntry::Place(place) => {
-                let timestamp =
-                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} place: {}", place.name)?;
+            HistoryEntry::Merchant(merchant) => {
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    merchant.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}       {} {frame} {}",
+                    merchant.name,
+                    superscript_label("merchant")
+                )?;
             }
             HistoryEntry::Place2(place) => {
-                let timestamp =
-                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} place2: {}", place.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    place.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}   {} {frame} {}",
+                    place.name,
+                    superscript_label("place2")
+                )?;
+            }
+            HistoryEntry::Place1(place) => {
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    place.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp} {} {frame} {}",
+                    place.name,
+                    superscript_label("place1")
+                )?;
             }
             HistoryEntry::Place3(place) => {
-                let timestamp =
-                    format_history_timestamp(place.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} place3: {}", place.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    place.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}     {} {frame} {}",
+                    place.name,
+                    superscript_label("place3")
+                )?;
             }
             HistoryEntry::LostGraceDiscovered(event) => {
-                let timestamp =
-                    format_history_timestamp(event.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} lost_grace_discovered")?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    event.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(output_file, "{timestamp}       Lost Grace Discovered {frame}")?;
             }
             HistoryEntry::Region(region) => {
-                let timestamp =
-                    format_history_timestamp(region.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} region: {}", region.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    region.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}   {} {frame} {}",
+                    region.name,
+                    superscript_label("region")
+                )?;
             }
             HistoryEntry::Boss(boss) => {
-                let timestamp =
-                    format_history_timestamp(boss.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} boss: {}", boss.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    boss.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp} {} {frame} {}",
+                    boss.name,
+                    superscript_label("boss")
+                )?;
             }
             HistoryEntry::NewItem(item) => {
-                let timestamp =
-                    format_history_timestamp(item.timestamp_ns, frame_rate_num, frame_rate_den);
-                writeln!(output_file, "{timestamp} newitem: {}", item.name)?;
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    item.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}         {} {frame} {}",
+                    item.name,
+                    superscript_label("newitem")
+                )?;
             }
         }
     }
     Ok(())
 }
 
+fn format_history_timestamp_with_spacing(
+    timestamp_ns: u128,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
+    previous_real_timestamp_ns: &mut Option<u128>,
+) -> (String, String) {
+    const REAL_TIMESTAMP_INTERVAL_NS: u128 = 10_000_000_000;
+
+    let is_real = match *previous_real_timestamp_ns {
+        None => true,
+        Some(previous) => timestamp_ns.saturating_sub(previous) >= REAL_TIMESTAMP_INTERVAL_NS,
+    };
+    if is_real {
+        *previous_real_timestamp_ns = Some(timestamp_ns);
+    }
+
+    let (mut timestamp, frame) =
+        format_history_timestamp(timestamp_ns, frame_rate_num, frame_rate_den);
+    if !is_real {
+        timestamp = timestamp.replace(':', "։");
+    }
+    (timestamp, frame)
+}
+
+fn history_entry_timestamp_ns(entry: &HistoryEntry) -> u128 {
+    match entry {
+        HistoryEntry::TextAct(entry) => entry.timestamp_ns,
+        HistoryEntry::Location1(entry) => entry.timestamp_ns,
+        HistoryEntry::Location2(entry) => entry.timestamp_ns,
+        HistoryEntry::Story(entry) => entry.timestamp_ns,
+        HistoryEntry::Combat1(entry) => entry.timestamp_ns,
+        HistoryEntry::Grace(entry) => entry.timestamp_ns,
+        HistoryEntry::Merchant(entry) => entry.timestamp_ns,
+        HistoryEntry::Place2(entry) => entry.timestamp_ns,
+        HistoryEntry::Place1(entry) => entry.timestamp_ns,
+        HistoryEntry::Place3(entry) => entry.timestamp_ns,
+        HistoryEntry::LostGraceDiscovered(entry) => entry.timestamp_ns,
+        HistoryEntry::Region(entry) => entry.timestamp_ns,
+        HistoryEntry::Boss(entry) => entry.timestamp_ns,
+        HistoryEntry::NewItem(entry) => entry.timestamp_ns,
+    }
+}
+
+fn superscript_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|character| match character {
+            'a' => 'ᵃ',
+            'b' => 'ᵇ',
+            'c' => 'ᶜ',
+            'd' => 'ᵈ',
+            'e' => 'ᵉ',
+            'f' => 'ᶠ',
+            'g' => 'ᵍ',
+            'h' => 'ʰ',
+            'i' => 'ⁱ',
+            'j' => 'ʲ',
+            'k' => 'ᵏ',
+            'l' => 'ˡ',
+            'm' => 'ᵐ',
+            'n' => 'ⁿ',
+            'o' => 'ᵒ',
+            'p' => 'ᵖ',
+            'r' => 'ʳ',
+            's' => 'ˢ',
+            't' => 'ᵗ',
+            'u' => 'ᵘ',
+            'v' => 'ᵛ',
+            'w' => 'ʷ',
+            'x' => 'ˣ',
+            'y' => 'ʸ',
+            'z' => 'ᶻ',
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            'L' => 'ᴸ',
+            'G' => 'ᴳ',
+            'D' => 'ᴰ',
+            other => other,
+        })
+        .collect()
+}
+
 fn format_history_timestamp(
     timestamp_ns: u128,
     frame_rate_num: u32,
     frame_rate_den: u32,
-) -> String {
+) -> (String, String) {
     let elapsed_seconds = timestamp_ns / 1_000_000_000;
     let hours = elapsed_seconds / 3_600;
     let minutes = (elapsed_seconds / 60) % 60;
@@ -1770,7 +2022,24 @@ fn format_history_timestamp(
         (0, minutes) => format!("{minutes}:{seconds:02}"),
         (hours, minutes) => format!("{hours}:{minutes:02}:{seconds:02}"),
     };
-    format!("{time} (:{frame})")
+    let frame = frame
+        .to_string()
+        .chars()
+        .map(|digit| match digit {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            _ => unreachable!("frame number is decimal"),
+        })
+        .collect::<String>();
+    (time, frame)
 }
 
 fn draw_bounding_box(frame: &mut [u8], frame_width: usize, bounds: &BoundingBox) {
@@ -1797,8 +2066,9 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 mod tests {
     use super::{
         add_boss, add_combat1, add_grace, add_location1, add_location2, add_lost_grace_discovered,
-        add_place, add_place2, add_place3, add_region, add_story, add_textact, merge_history, BoundingBox, Detector,
-        DetectorPriority, EldenDetector, HistoryEntry, Place,
+        add_merchant, add_place2, add_place1, add_place3, add_region, add_story, add_textact,
+        merge_history, BoundingBox, Detector, DetectorPriority, EldenDetector, HistoryEntry,
+        Place2,
     };
 
     fn write_history_single_line(history: &super::History, output: &mut Vec<u8>) {
@@ -1844,9 +2114,9 @@ mod tests {
             [
                 EldenDetector::Boss,
                 EldenDetector::Grace,
-                EldenDetector::Place2,
+                EldenDetector::Place1,
                 EldenDetector::Place3,
-                EldenDetector::Place,
+                EldenDetector::Place2,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::NewItem,
             ]
@@ -1876,7 +2146,70 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"1:01:01 (:0) act: A12, Opening\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n1:01:01 A12, Opening ⁰ ᵃᶜᵗ\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn adds_begin_marker_when_history_has_no_zero_timestamp_item() {
+        let history = Vec::new();
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(output, "0:00 begin\n".as_bytes());
+    }
+
+    #[test]
+    fn uses_cosmetic_timestamps_until_ten_seconds_after_the_last_real_timestamp() {
+        let boss = |timestamp_ns: u128, name: &str| {
+            HistoryEntry::Boss(super::Boss {
+                timestamp_ns,
+                name: name.to_string(),
+            })
+        };
+        let history = vec![
+            boss(0, "First"),
+            boss(9_500_000_000, "Cosmetic"),
+            boss(10_000_000_000, "Real at ten"),
+            boss(19_500_000_000, "Cosmetic after ten"),
+            boss(20_000_000_000, "Real at twenty"),
+            boss(3_661_000_000_000, "Real with hours"),
+            boss(3_665_000_000_000, "Cosmetic with hours"),
+        ];
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(
+            output,
+            "0:00 First ⁰ ᵇᵒˢˢ\n\
+             0։09 Cosmetic ¹⁵ ᵇᵒˢˢ\n\
+             0:10 Real at ten ⁰ ᵇᵒˢˢ\n\
+             0։19 Cosmetic after ten ¹⁵ ᵇᵒˢˢ\n\
+             0:20 Real at twenty ⁰ ᵇᵒˢˢ\n\
+             1:01:01 Real with hours ⁰ ᵇᵒˢˢ\n\
+             1։01։05 Cosmetic with hours ⁰ ᵇᵒˢˢ\n"
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn does_not_add_begin_marker_when_item_is_within_first_second() {
+        let mut history = Vec::new();
+        add_textact(
+            &mut history,
+            500_000_000,
+            "A12".to_string(),
+            "Opening".to_string(),
+        );
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(output, "0:00 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
     }
 
     #[test]
@@ -1892,26 +2225,29 @@ mod tests {
 
         super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
 
-        assert_eq!(output, b"0:02 (:15) act: A12, Opening\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes()
+        );
     }
 
     #[test]
     fn omits_zero_leading_timestamp_fields() {
         assert_eq!(
             super::format_history_timestamp(61_000_000_000, 30, 1),
-            "1:01 (:0)"
+            ("1:01".to_string(), "⁰".to_string())
         );
         assert_eq!(
             super::format_history_timestamp(2_500_000_000, 30, 1),
-            "0:02 (:15)"
+            ("0:02".to_string(), "¹⁵".to_string())
         );
         assert_eq!(
             super::format_history_timestamp(3_661_100_000_000, 30, 1),
-            "1:01:01 (:3)"
+            ("1:01:01".to_string(), "³".to_string())
         );
         assert_eq!(
             super::format_history_timestamp(966_666_666, 30, 1),
-            "0:00 (:29)"
+            ("0:00".to_string(), "²⁹".to_string())
         );
     }
 
@@ -1927,7 +2263,10 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) location2: Loyal Friend's Grave\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02 Loyal Friend's Grave ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ²\n".as_bytes()
+        );
     }
 
     #[test]
@@ -1938,7 +2277,10 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) location1: Kin Prefecture\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02 Kin Prefecture ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ¹\n".as_bytes()
+        );
     }
 
     #[test]
@@ -1949,7 +2291,10 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) story: From the darkness\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02 From the darkness ⁰ ˢᵗᵒʳʸ\n".as_bytes()
+        );
     }
 
     #[test]
@@ -1960,7 +2305,10 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) combat1: RYUZO\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02 RYUZO ⁰ ᶜᵒᵐᵇᵃᵗ¹\n".as_bytes()
+        );
     }
 
     #[test]
@@ -1971,18 +2319,35 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) grace: Road to the Manor\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02       Road to the Manor ⁰ ᵍʳᵃᶜᵉ\n".as_bytes()
+        );
     }
 
     #[test]
-    fn writes_place_entries_on_single_lines() {
+    fn writes_merchant_entries_on_single_lines() {
         let mut history = Vec::new();
-        add_place(&mut history, 2_000_000_000, "Caria Manor".to_string());
+        add_merchant(&mut history, 2_000_000_000, "Nomadic Merchant".to_string());
         let mut output = Vec::new();
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, b"0:02 (:0) place: Caria Manor\n");
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02       Nomadic Merchant ⁰ ᵐᵉʳᶜʰᵃⁿᵗ\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn writes_place2_entries_on_single_lines() {
+        let mut history = Vec::new();
+        add_place2(&mut history, 2_000_000_000, "Caria Manor".to_string());
+        let mut output = Vec::new();
+
+        write_history_single_line(&history, &mut output);
+
+        assert_eq!(output, "0:00 begin\n0։02   Caria Manor ⁰ ᵖˡᵃᶜᵉ²\n".as_bytes());
     }
 
     #[test]
@@ -1997,7 +2362,7 @@ mod tests {
 
         assert_eq!(
             output,
-            b"0:02 (:0) region: Three Sisters\n2:02 (:0) region: Three Sisters\n"
+            "0:00 begin\n0։02   Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n2:02   Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n".as_bytes()
         );
     }
 
@@ -2013,7 +2378,7 @@ mod tests {
 
         assert_eq!(
             output,
-            b"0:02 (:0) lost_grace_discovered\n2:02 (:0) lost_grace_discovered\n"
+            "0:00 begin\n0։02       Lost Grace Discovered ⁰\n2:02       Lost Grace Discovered ⁰\n".as_bytes()
         );
     }
 
@@ -2041,21 +2406,21 @@ mod tests {
 
         assert_eq!(
             output,
-            b"0:02 (:0) boss: Royal Knight Loretta\n2:02 (:0) boss: Royal Knight Loretta\n"
+            "0:00 begin\n0։02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n2:02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n".as_bytes()
         );
     }
 
     #[test]
-    fn deduplicates_matching_place_entries_within_120_seconds() {
+    fn deduplicates_matching_place2_entries_within_120_seconds() {
         let mut history = Vec::new();
-        add_place(&mut history, 1_000_000_000, "Caria Manor".to_string());
-        add_place(&mut history, 120_000_000_000, "Caria Manor".to_string());
-        add_place(&mut history, 121_000_000_001, "Caria Manor".to_string());
+        add_place2(&mut history, 1_000_000_000, "Caria Manor".to_string());
+        add_place2(&mut history, 120_000_000_000, "Caria Manor".to_string());
+        add_place2(&mut history, 121_000_000_001, "Caria Manor".to_string());
 
         let places: Vec<&str> = history
             .iter()
             .map(|entry| match entry {
-                HistoryEntry::Place(place) => place.name.as_str(),
+                HistoryEntry::Place2(place) => place.name.as_str(),
                 _ => panic!("unexpected history entry"),
             })
             .collect();
@@ -2063,9 +2428,9 @@ mod tests {
     }
 
     #[test]
-    fn writes_place2_and_place3_labels_on_single_lines() {
+    fn writes_place1_and_place3_labels_on_single_lines() {
         let mut history = Vec::new();
-        add_place2(&mut history, 2_000_000_000, "Limgrave".to_string());
+        add_place1(&mut history, 2_000_000_000, "Limgrave".to_string());
         add_place3(&mut history, 3_000_000_000, "Church of Elleh".to_string());
         let mut output = Vec::new();
 
@@ -2073,26 +2438,26 @@ mod tests {
 
         assert_eq!(
             output,
-            b"0:02 (:0) place2: Limgrave\n0:03 (:0) place3: Church of Elleh\n"
+            "0:00 begin\n0։02 Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03     Church of Elleh ⁰ ᵖˡᵃᶜᵉ³\n".as_bytes()
         );
     }
 
     #[test]
     fn deduplicates_place_kinds_only_within_the_same_kind() {
         let mut history = Vec::new();
-        add_place(&mut history, 1_000_000_000, "Limgrave".to_string());
-        add_place2(&mut history, 2_000_000_000, "Limgrave".to_string());
+        add_place2(&mut history, 1_000_000_000, "Limgrave".to_string());
+        add_place1(&mut history, 2_000_000_000, "Limgrave".to_string());
         add_place3(&mut history, 3_000_000_000, "Limgrave".to_string());
-        add_place2(&mut history, 4_000_000_000, "Limgrave".to_string());
+        add_place1(&mut history, 4_000_000_000, "Limgrave".to_string());
         add_place3(&mut history, 5_000_000_000, "Limgrave".to_string());
-        add_place(&mut history, 6_000_000_000, "Limgrave".to_string());
+        add_place2(&mut history, 6_000_000_000, "Limgrave".to_string());
         let mut output = Vec::new();
 
         write_history_single_line(&history, &mut output);
 
         assert_eq!(
             output,
-            b"0:01 (:0) place: Limgrave\n0:02 (:0) place2: Limgrave\n0:03 (:0) place3: Limgrave\n"
+            "0:00 begin\n0։01   Limgrave ⁰ ᵖˡᵃᶜᵉ²\n0։02 Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03     Limgrave ⁰ ᵖˡᵃᶜᵉ³\n".as_bytes()
         );
     }
 
@@ -2204,8 +2569,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
-                    panic!("unexpected Place entry")
+                HistoryEntry::Merchant(_) => panic!("unexpected Merchant entry"),
+                HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place2 entry")
                 }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
@@ -2245,8 +2611,9 @@ mod tests {
                 HistoryEntry::Story(story) => story.text.as_str(),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
-                    panic!("unexpected Place entry")
+                HistoryEntry::Merchant(_) => panic!("unexpected Merchant entry"),
+                HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place2 entry")
                 }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
@@ -2287,8 +2654,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
-                    panic!("unexpected Place entry")
+                HistoryEntry::Merchant(_) => panic!("unexpected Merchant entry"),
+                HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place2 entry")
                 }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
@@ -2320,8 +2688,9 @@ mod tests {
                 HistoryEntry::Story(_) => panic!("unexpected Story entry"),
                 HistoryEntry::Combat1(_) => panic!("unexpected Combat1 entry"),
                 HistoryEntry::Grace(_) => panic!("unexpected Grace entry"),
-                HistoryEntry::Place(_) | HistoryEntry::Place2(_) | HistoryEntry::Place3(_) => {
-                    panic!("unexpected Place entry")
+                HistoryEntry::Merchant(_) => panic!("unexpected Merchant entry"),
+                HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => {
+                    panic!("unexpected Place2 entry")
                 }
                 HistoryEntry::LostGraceDiscovered(_) => {
                     panic!("unexpected LostGraceDiscovered entry")
@@ -2336,16 +2705,36 @@ mod tests {
 
     #[test]
     fn merge_history_uses_the_configured_dedupe_window() {
-        let mut history = vec![HistoryEntry::Place(Place {
+        let mut history = vec![HistoryEntry::Place2(Place2 {
             timestamp_ns: 1_000_000_000,
             name: "Caria Manor".to_string(),
         })];
-        let frame_history = vec![HistoryEntry::Place(Place {
+        let frame_history = vec![HistoryEntry::Place2(Place2 {
             timestamp_ns: 12_000_000_000,
             name: "Caria Manor".to_string(),
         })];
 
         merge_history(&mut history, frame_history, 10_000_000_000);
+
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn merge_merchant_history_uses_the_configured_dedupe_window() {
+        let merchant = |timestamp_ns| {
+            HistoryEntry::Merchant(super::Merchant {
+                timestamp_ns,
+                name: "Nomadic Merchant".to_string(),
+            })
+        };
+        let mut history = vec![merchant(1_000_000_000)];
+
+        merge_history(&mut history, vec![merchant(5_000_000_000)], 10_000_000_000);
+        merge_history(
+            &mut history,
+            vec![merchant(12_000_000_000)],
+            10_000_000_000,
+        );
 
         assert_eq!(history.len(), 2);
     }
@@ -2365,7 +2754,7 @@ mod tests {
         write_history_single_line(&history, &mut output);
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            format!("0:00 (:0) newitem: {name}\n0:11 (:0) newitem: {name}\n")
+            format!("0:00         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n0:11         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n")
         );
     }
 
@@ -2389,7 +2778,7 @@ mod tests {
             .expect("three separator lines");
         for use_library in [true, false] {
             let cache = crate::ocr_support::OcrCache::default();
-            let mut session = crate::ocr_support::OcrSession::new(use_library, &cache);
+            let mut session = crate::ocr_support::OcrSession::new(use_library, false, &cache);
             assert_eq!(
                 session.recognize(&frame, width, height, &detection.label, 1).as_deref(),
                 Some("NEW")
@@ -2484,7 +2873,7 @@ mod tests {
     ) {
         for use_library in [true, false] {
             let cache = crate::ocr_support::OcrCache::default();
-            let mut session = crate::ocr_support::OcrSession::new(use_library, &cache);
+            let mut session = crate::ocr_support::OcrSession::new(use_library, false, &cache);
             let state = super::ProcessingState {
                 game: super::Game::EldenRing,
                 current_frame: 0,
@@ -2505,16 +2894,16 @@ mod tests {
 
     #[test]
     #[ignore = "requires local samples/limgrave.png, FFmpeg, and Tesseract"]
-    fn place2_from_limgrave_png() {
+    fn place1_from_limgrave_png() {
         let (frame, width, height) = decode_sample_png("limgrave.png");
-        let detection = super::find_place2_detection(&frame, width, height).expect("place2 banner");
+        let detection = super::find_place1_detection(&frame, width, height).expect("place1 banner");
         assert!(detection.line.top.abs_diff(1_156) <= 2);
         assert_single_sample_entry(
             &frame,
             width,
             height,
             |state, frame, session, history| {
-                super::process_place2_detector(
+                super::process_place1_detector(
                     state,
                     frame,
                     &mut Vec::new(),
@@ -2524,7 +2913,7 @@ mod tests {
                     0,
                 )
             },
-            &HistoryEntry::Place2(super::Place2 {
+            &HistoryEntry::Place1(super::Place1 {
                 timestamp_ns: 0,
                 name: "Limgrave".to_string(),
             }),
@@ -2561,10 +2950,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local grace and merchant sample images plus FFmpeg"]
+    fn classifies_grace_and_merchant_sample_icons() {
+        for (filename, expected_kind) in [
+            ("grace.png", crate::elden::GraceSymbolKind::Grace),
+            ("merchant1.png", crate::elden::GraceSymbolKind::Merchant),
+            ("merchant2.png", crate::elden::GraceSymbolKind::Merchant),
+        ] {
+            let (frame, width, height) = decode_sample_png(filename);
+            let detection = super::find_grace_detection(&frame, width, height)
+                .unwrap_or_else(|| panic!("expected symbol box in {filename}"));
+            assert_eq!(detection.kind, expected_kind, "misclassified {filename}");
+        }
+    }
+
+    #[test]
     #[ignore = "requires local samples/elleh_p.png, FFmpeg, and Tesseract"]
     fn place3_from_elleh_png() {
         let (frame, width, height) = decode_sample_png("elleh_p.png");
-        assert!(super::find_place2_detection(&frame, width, height).is_none());
+        assert!(super::find_place1_detection(&frame, width, height).is_none());
         let detection = super::find_place3_detection(&frame, width, height).expect("place3 banner");
         assert!(detection.line.top.abs_diff(776) <= 3);
         assert_single_sample_entry(
@@ -2608,4 +3012,3 @@ mod tests {
         assert_eq!(&frame[inner_pixel..inner_pixel + 4], &[255, 255, 255, 255]);
     }
 }
-
