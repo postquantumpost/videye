@@ -12,11 +12,6 @@ pub(crate) enum GraceSymbolKind {
     Merchant,
 }
 
-pub(crate) struct Place2Detection {
-    pub(crate) line: BoundingBox,
-    pub(crate) text: BoundingBox,
-}
-
 pub(crate) struct PlaceBannerDetection {
     pub(crate) line: BoundingBox,
     pub(crate) banner: BoundingBox,
@@ -369,78 +364,8 @@ pub(crate) fn find_place2_detection(
     frame: &[u8],
     width: usize,
     height: usize,
-) -> Option<Place2Detection> {
-    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
-    if width == 0 || height == 0 || frame.len() < expected_len {
-        return None;
-    }
-
-    let expected_y = height.saturating_mul(423) / 1_000;
-    let y_radius = (height.saturating_mul(18) / 1_000).max(2);
-    let expected_length = (width.saturating_mul(272) / 1_000).max(24);
-    let min_length = expected_length.saturating_mul(75) / 100;
-    let max_length = expected_length.saturating_mul(125) / 100;
-    let search_left = width.saturating_mul(20) / 100;
-    let search_right = width.saturating_mul(80) / 100;
-    let mut best: Option<(f32, BoundingBox)> = None;
-
-    for y in
-        expected_y.saturating_sub(y_radius)..=expected_y.saturating_add(y_radius).min(height - 1)
-    {
-        let Some((left, right, support)) = place2_line_run(
-            frame,
-            width,
-            height,
-            y,
-            search_left,
-            search_right,
-            (expected_length / 100).max(2),
-        ) else {
-            continue;
-        };
-        let line_width = right - left + 1;
-        let center = left + line_width / 2;
-        if line_width < min_length
-            || line_width > max_length
-            || center.abs_diff(width / 2) > width.saturating_mul(6) / 100
-            || support * 2 < line_width
-        {
-            continue;
-        }
-
-        let coverage = support as f32 / line_width as f32;
-        let width_penalty = line_width.abs_diff(expected_length) as f32 / expected_length as f32;
-        let y_penalty = y.abs_diff(expected_y) as f32 / y_radius.max(1) as f32;
-        let score = coverage - width_penalty * 0.35 - y_penalty * 0.08;
-        if best
-            .as_ref()
-            .is_none_or(|(best_score, _)| score > *best_score)
-        {
-            best = Some((
-                score,
-                BoundingBox {
-                    left,
-                    top: y,
-                    width: line_width,
-                    height: 1,
-                },
-            ));
-        }
-    }
-
-    let (_, line) = best?;
-    let text_height = (height.saturating_mul(55) / 1_000).max(18).min(line.top);
-    let gap = (height.saturating_mul(3) / 1_000).max(1);
-    let text_top = line.top.saturating_sub(text_height.saturating_add(gap));
-    (line.width >= 20 && text_top < line.top).then_some(Place2Detection {
-        text: BoundingBox {
-            left: line.left,
-            top: text_top,
-            width: line.width,
-            height: line.top - gap - text_top,
-        },
-        line,
-    })
+) -> Option<PlaceBannerDetection> {
+    find_place_banner(frame, width, height, &PLACE2_LAYOUT)
 }
 
 const BANNER_SAMPLES: usize = 16;
@@ -490,6 +415,24 @@ const PLACE1_LAYOUT: BannerLayout = BannerLayout {
     scan_right: 7_000,
     banner_left: 3_100,
     banner_right: 6_700,
+};
+
+/// Location-name banners use the same appearance as place1, but sit between place3 and place1
+/// vertically and have a narrower band.
+const PLACE2_LAYOUT: BannerLayout = BannerLayout {
+    line: 4_230,
+    band_height: 574,
+    middle: 180,
+    text_height: 550,
+    descender: 120,
+    padding: 200,
+    min_text_luma: 220,
+    columns_left: 3_990,
+    columns_right: 6_010,
+    scan_left: 3_200,
+    scan_right: 6_800,
+    banner_left: 3_640,
+    banner_right: 6_360,
 };
 
 /// Smaller location names such as "Church of Elleh", in a thinner band higher in the frame.
@@ -1322,38 +1265,6 @@ fn banner_glyph_shape(component: &OrangeComponent, is_l: bool) -> bool {
     }
 }
 
-fn place2_line_run(
-    frame: &[u8],
-    width: usize,
-    height: usize,
-    y: usize,
-    search_left: usize,
-    search_right: usize,
-    allowed_gap: usize,
-) -> Option<(usize, usize, usize)> {
-    let mut best = None;
-    let mut start = None;
-    let mut last_support = 0;
-    let mut support = 0;
-
-    for x in search_left..search_right.min(width) {
-        if is_place2_line_pixel(frame, width, height, x, y) {
-            if start.is_none() {
-                start = Some(x);
-            }
-            last_support = x;
-            support += 1;
-        } else if start.is_some() && x.saturating_sub(last_support) > allowed_gap {
-            update_place2_run(&mut best, start.take()?, last_support, support);
-            support = 0;
-        }
-    }
-    if let Some(start) = start {
-        update_place2_run(&mut best, start, last_support, support);
-    }
-    best
-}
-
 fn boss_line_run(
     frame: &[u8],
     width: usize,
@@ -1375,12 +1286,12 @@ fn boss_line_run(
             last_support = x;
             support += 1;
         } else if start.is_some() && x.saturating_sub(last_support) > allowed_gap {
-            update_place2_run(&mut best, start.take()?, last_support, support);
+            update_best_run(&mut best, start.take()?, last_support, support);
             support = 0;
         }
     }
     if let Some(start) = start {
-        update_place2_run(&mut best, start, last_support, support);
+        update_best_run(&mut best, start, last_support, support);
     }
     best
 }
@@ -1424,7 +1335,7 @@ fn boss_red_thickness(
     thickness
 }
 
-fn update_place2_run(
+fn update_best_run(
     best: &mut Option<(usize, usize, usize)>,
     start: usize,
     end: usize,
@@ -1433,32 +1344,6 @@ fn update_place2_run(
     if best.is_none_or(|(_, _, best_support)| support > best_support) {
         *best = Some((start, end, support));
     }
-}
-
-fn is_place2_line_pixel(frame: &[u8], width: usize, height: usize, x: usize, y: usize) -> bool {
-    if y == 0 || y + 1 >= height {
-        return false;
-    }
-    let pixel = (y * width + x) * 4;
-    let red = frame[pixel];
-    let green = frame[pixel + 1];
-    let blue = frame[pixel + 2];
-    let minimum = red.min(green).min(blue);
-    let maximum = red.max(green).max(blue);
-    let luma = (299 * u32::from(red) + 587 * u32::from(green) + 114 * u32::from(blue)) / 1_000;
-    let above = ((y - 1) * width + x) * 4;
-    let below = ((y + 1) * width + x) * 4;
-    let above_luma = (299 * u32::from(frame[above])
-        + 587 * u32::from(frame[above + 1])
-        + 114 * u32::from(frame[above + 2]))
-        / 1_000;
-    let below_luma = (299 * u32::from(frame[below])
-        + 587 * u32::from(frame[below + 1])
-        + 114 * u32::from(frame[below + 2]))
-        / 1_000;
-    (45..=230).contains(&luma)
-        && maximum - minimum <= 55
-        && luma.abs_diff(above_luma).max(luma.abs_diff(below_luma)) >= 6
 }
 
 #[derive(Clone, Copy)]
@@ -1753,25 +1638,22 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_scaled_place2_underline_and_text_crop() {
-        for (width, height) in [(1_365, 768), (1_920, 1_080)] {
-            let expected_y = height * 423 / 1_000;
-            let expected_length = width * 272 / 1_000;
-            let left = (width - expected_length) / 2;
-            let mut frame = vec![0; width * height * 4];
-            for pixel in frame.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&[32, 32, 32, 255]);
-            }
-            for x in left..left + expected_length {
-                set_pixel(&mut frame, width, x, expected_y, [150, 150, 150, 255]);
-            }
-
+    fn finds_place2_banner_at_its_frame_location() {
+        for (width, height, scene) in [(1_920, 1_080, 140), (3_840, 2_160, 110)] {
+            let (mut frame, top, line) = place2_frame(width, height, scene);
+            draw_place1_strokes(&mut frame, width, height, line);
             let detection = find_place2_detection(&frame, width, height).unwrap();
-            assert_eq!(detection.line.top, expected_y);
-            assert_eq!(detection.line.left, left);
-            assert_eq!(detection.line.width, expected_length);
+            assert!(detection.line.top.abs_diff(line) <= 1);
+            assert!(detection.banner.top.abs_diff(top) <= height / 200);
+            assert_eq!(detection.line.left, width * 3_640 / 10_000);
+            assert_eq!(
+                detection.line.width,
+                width * 6_360 / 10_000 - width * 3_640 / 10_000
+            );
+            assert_eq!(detection.text_luma, 250);
             assert!(detection.text.top < detection.line.top);
-            assert!(detection.text.left <= detection.line.left);
+            assert!(detection.text.left < width * 42 / 100);
+            assert!(detection.text.left + detection.text.width > width * 56 / 100);
         }
     }
 
@@ -1790,6 +1672,28 @@ mod tests {
         }
         for y in line - 1..=line + 1 {
             for x in width * 31 / 100..width * 67 / 100 {
+                let grey = scene + 20;
+                set_pixel(&mut frame, width, x, y, [grey, grey, grey, 255]);
+            }
+        }
+        (frame, top, line)
+    }
+
+    fn place2_frame(width: usize, height: usize, scene: u8) -> (Vec<u8>, usize, usize) {
+        let mut frame = vec![0; width * height * 4];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[scene, scene, scene, 255]);
+        }
+        let line = height * 4_230 / 10_000;
+        let top = line - height * 574 / 10_000;
+        let dark = scene / 2;
+        for y in top..line {
+            for x in width * 36 / 100..width * 64 / 100 {
+                set_pixel(&mut frame, width, x, y, [dark, dark, dark, 255]);
+            }
+        }
+        for y in line - 1..=line + 1 {
+            for x in width * 36 / 100..width * 64 / 100 {
                 let grey = scene + 20;
                 set_pixel(&mut frame, width, x, y, [grey, grey, grey, 255]);
             }
@@ -1877,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_frames_without_a_place2_underline() {
+    fn rejects_frames_without_a_place2_banner() {
         let width = 480;
         let height = 300;
         let frame = vec![32; width * height * 4];

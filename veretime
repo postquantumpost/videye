@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+cargo install --path .
+
+n=$(nproc)
+echo running on $n cpus
+
+for f in $*
+do
+    echo ''
+    echo process $f
+    #time videye --retime $f
+    time videye --retime $f
+done

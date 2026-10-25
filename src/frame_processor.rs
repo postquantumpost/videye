@@ -1,6 +1,6 @@
 use crate::elden::{
     find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-    find_newitem_detection, find_place1_detection, find_place3_detection, find_place2_detection,
+    find_newitem_detection, find_place1_detection, find_place2_detection, find_place3_detection,
     find_region2_detection, place_banner_text_image, GraceSymbolKind, PlaceBannerDetection,
 };
 use crate::ghost::{
@@ -459,38 +459,19 @@ fn process_place2_detector(
     history: &mut History,
     elapsed_ns: u128,
 ) -> io::Result<bool> {
-    let Some(detection) = find_place2_detection(frame, state.frame_width, state.frame_height) else {
-        return Ok(false);
-    };
-
-    if let Some(annotated_frame) = annotated_frame {
-        for x in detection.line.left..detection.line.left + detection.line.width {
-            set_red_pixel(annotated_frame, state.frame_width, x, detection.line.top);
-        }
-    }
-    if state.verbose {
-        writeln!(
-            output_file,
-            "Place2 underline: x={} y={} width={}",
-            detection.line.left, detection.line.top, detection.line.width
-        )?;
-    }
-    let recognized_text = ocr_session.recognize(
+    let detection = find_place2_detection(frame, state.frame_width, state.frame_height);
+    process_place_banner(
+        state,
         frame,
-        state.frame_width,
-        state.frame_height,
-        &detection.text,
-        state.current_frame,
-    );
-    let Some(recognized_text) = recognized_text else {
-        return Ok(false);
-    };
-    let name = normalize_place_name(&recognized_text);
-    if name.is_empty() {
-        return Ok(false);
-    }
-    add_place2(history, elapsed_ns, name);
-    Ok(true)
+        output_file,
+        annotated_frame,
+        ocr_session,
+        history,
+        elapsed_ns,
+        detection,
+        "Place2",
+        add_place2,
+    )
 }
 
 fn process_place1_detector(
@@ -1926,6 +1907,20 @@ fn format_history_timestamp_with_spacing(
     frame_rate_den: u32,
     previous_real_timestamp_ns: &mut Option<u128>,
 ) -> (String, String) {
+    let is_real = history_timestamp_is_real(timestamp_ns, previous_real_timestamp_ns);
+
+    let (mut timestamp, frame) =
+        format_history_timestamp(timestamp_ns, frame_rate_num, frame_rate_den);
+    if !is_real {
+        timestamp = timestamp.replace(':', "։");
+    }
+    (timestamp, frame)
+}
+
+pub(crate) fn history_timestamp_is_real(
+    timestamp_ns: u128,
+    previous_real_timestamp_ns: &mut Option<u128>,
+) -> bool {
     const REAL_TIMESTAMP_INTERVAL_NS: u128 = 10_000_000_000;
 
     let is_real = match *previous_real_timestamp_ns {
@@ -1935,13 +1930,7 @@ fn format_history_timestamp_with_spacing(
     if is_real {
         *previous_real_timestamp_ns = Some(timestamp_ns);
     }
-
-    let (mut timestamp, frame) =
-        format_history_timestamp(timestamp_ns, frame_rate_num, frame_rate_den);
-    if !is_real {
-        timestamp = timestamp.replace(':', "։");
-    }
-    (timestamp, frame)
+    is_real
 }
 
 fn history_entry_timestamp_ns(entry: &HistoryEntry) -> u128 {

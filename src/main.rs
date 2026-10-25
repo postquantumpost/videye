@@ -8,11 +8,13 @@ mod frame_processor;
 mod ghost;
 mod ocr_support;
 mod processing;
+mod retime;
 
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
         eprintln!("Usage: videye --in inputfile --out outputfile [--game gt|er] [--vout video_outputfile] [--parallel-count count] [--skip n] [--dedupe seconds] [--check-story-line-thickness true|false] [--use-tesseract-library true|false] [--verbose]");
+        eprintln!("       videye --retime filename");
         process::exit(2);
     }
 }
@@ -22,6 +24,7 @@ fn run() -> Result<(), String> {
     let mut input = None;
     let mut output = None;
     let mut video_output = None;
+    let mut retime_file = None;
     let mut game = Game::default();
     let mut parallel_count = 16;
     let mut skip = 0;
@@ -44,6 +47,7 @@ fn run() -> Result<(), String> {
                     "--in" => input = Some(value),
                     "--out" => output = Some(value),
                     "--vout" => video_output = Some(value),
+                    "--retime" => retime_file = Some(value),
                     "--game" => {
                         game = match value.as_str() {
                             "gt" => Game::GhostofTsushima,
@@ -89,6 +93,13 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+    }
+
+    if let Some(filename) = retime_file {
+        if input.is_some() || output.is_some() || video_output.is_some() {
+            return Err("--retime cannot be combined with --in, --out, or --vout".to_string());
+        }
+        return retime::retime_file(&filename);
     }
 
     if let Some(input) = &input {
