@@ -1454,7 +1454,13 @@ pub(crate) fn merge_history(
     history: &mut History,
     frame_history: History,
     dedupe_window_ns: u128,
+    dedup_mode_1: bool,
 ) {
+    if !dedup_mode_1 {
+        history.extend(frame_history);
+        return;
+    }
+
     for entry in frame_history {
         match entry {
             HistoryEntry::TextAct(textact) => add_textact_with_window(
@@ -1525,6 +1531,57 @@ pub(crate) fn merge_history(
             }
         }
     }
+}
+
+fn history_entry_text(entry: &HistoryEntry) -> (&str, &str) {
+    match entry {
+        HistoryEntry::TextAct(entry) => (&entry.actnumber, &entry.acttitle),
+        HistoryEntry::Location1(entry) => (&entry.location1, ""),
+        HistoryEntry::Location2(entry) => (&entry.location2, ""),
+        HistoryEntry::Story(entry) => (&entry.text, ""),
+        HistoryEntry::Combat1(entry) => (&entry.text, ""),
+        HistoryEntry::Grace(entry) => (&entry.name, ""),
+        HistoryEntry::Merchant(entry) => (&entry.name, ""),
+        HistoryEntry::Place2(entry) => (&entry.name, ""),
+        HistoryEntry::Place1(entry) => (&entry.name, ""),
+        HistoryEntry::Place3(entry) => (&entry.name, ""),
+        HistoryEntry::LostGraceDiscovered(_) => ("", ""),
+        HistoryEntry::Region(entry) => (&entry.name, ""),
+        HistoryEntry::Boss(entry) => (&entry.name, ""),
+        HistoryEntry::NewItem(entry) => (&entry.name, ""),
+    }
+}
+
+fn history_entries_match(left: &HistoryEntry, right: &HistoryEntry) -> bool {
+    std::mem::discriminant(left) == std::mem::discriminant(right)
+        && history_entry_text(left) == history_entry_text(right)
+}
+
+pub(crate) fn deduplicate_history(
+    history: History,
+    minimum_duration_ns: u128,
+    repeat_duration_ns: u128,
+) -> History {
+    let mut entries = history.into_iter().peekable();
+    let mut filtered = History::new();
+    while let Some(first) = entries.next() {
+        let first_timestamp = history_entry_timestamp_ns(&first);
+        let mut last_timestamp = first_timestamp;
+        while let Some(next) = entries.next_if(|next| history_entries_match(next, &first)) {
+            last_timestamp = history_entry_timestamp_ns(&next);
+        }
+        if last_timestamp.saturating_sub(first_timestamp) >= minimum_duration_ns {
+            let is_repeat = filtered.last().is_some_and(|previous| {
+                history_entries_match(previous, &first)
+                    && first_timestamp.saturating_sub(history_entry_timestamp_ns(previous))
+                        < repeat_duration_ns
+            });
+            if !is_repeat {
+                filtered.push(first);
+            }
+        }
+    }
+    filtered
 }
 
 fn write_place_verbose(
@@ -2059,6 +2116,166 @@ mod tests {
         merge_history, BoundingBox, Detector, DetectorPriority, EldenDetector, HistoryEntry,
         Place2,
     };
+
+    #[test]
+    fn deduplicate_history_checks_duration_for_every_detection_type() {
+        let constructors: [fn(u128) -> HistoryEntry; 14] = [
+            |timestamp_ns| HistoryEntry::TextAct(super::TextAct {
+                timestamp_ns, actnumber: "1".into(), acttitle: "Title".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Location1(super::Location1 {
+                timestamp_ns, location1: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Location2(super::Location2 {
+                timestamp_ns, location2: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Story(super::Story {
+                timestamp_ns, text: "Text".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Combat1(super::Combat1 {
+                timestamp_ns, text: "Text".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Grace(super::Grace {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Merchant(super::Merchant {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Place2(super::Place2 {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Place1(super::Place1 {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Place3(super::Place3 {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::LostGraceDiscovered(super::LostGraceDiscovered {
+                timestamp_ns,
+            }),
+            |timestamp_ns| HistoryEntry::Region(super::Region {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::Boss(super::Boss {
+                timestamp_ns, name: "Name".into(),
+            }),
+            |timestamp_ns| HistoryEntry::NewItem(super::NewItem {
+                timestamp_ns, name: "Name".into(),
+            }),
+        ];
+        let threshold = 250_000_000;
+        for entry in constructors {
+            for span in [threshold - 1, threshold, threshold + 1] {
+                let history = vec![entry(1_000_000_000), entry(1_100_000_000), entry(1_000_000_000 + span)];
+                let result = super::deduplicate_history(history, threshold, 0);
+                let expected = if span >= threshold { vec![entry(1_000_000_000)] } else { vec![] };
+                assert_eq!(result, expected);
+            }
+            assert!(super::deduplicate_history(vec![entry(0)], threshold, 0).is_empty());
+            assert_eq!(super::deduplicate_history(vec![entry(0)], 0, 0), vec![entry(0)]);
+        }
+        assert!(super::deduplicate_history(vec![], threshold, 0).is_empty());
+    }
+
+    #[test]
+    fn deduplicate_history_does_not_join_groups_across_different_text_or_types() {
+        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
+            timestamp_ns, name: name.into(),
+        });
+        let other_type = |timestamp_ns| HistoryEntry::Place1(super::Place1 {
+            timestamp_ns, name: "A".into(),
+        });
+        let history = vec![
+            place(0, "A"), place(250_000_000, "B"), place(500_000_000, "A"),
+            other_type(750_000_000), place(1_000_000_000, "A"),
+            place(1_250_000_000, "A"), place(1_500_000_000, "B"),
+            place(1_750_000_000, "B"),
+        ];
+        assert_eq!(
+            super::deduplicate_history(history, 250_000_000, 0),
+            vec![place(1_000_000_000, "A"), place(1_500_000_000, "B")]
+        );
+    }
+
+    #[test]
+    fn deduplicate_history_suppresses_repeats_strictly_inside_the_window() {
+        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
+            timestamp_ns, name: name.into(),
+        });
+        let threshold = 250_000_000;
+        let repeat_window = 15_000_000_000;
+        for gap in [repeat_window - 1, repeat_window, repeat_window + 1] {
+            let history = vec![
+                place(0, "A"), place(threshold, "A"),
+                place(500_000_000, "discarded"),
+                place(gap, "A"), place(gap + threshold, "A"),
+            ];
+            let expected = if gap < repeat_window {
+                vec![place(0, "A")]
+            } else {
+                vec![place(0, "A"), place(gap, "A")]
+            };
+            assert_eq!(
+                super::deduplicate_history(history, threshold, repeat_window),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn deduplicate_history_compares_repeats_to_last_retained_timestamp() {
+        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
+            timestamp_ns, name: name.into(),
+        });
+        let history = vec![
+            place(0, "A"), place(250_000_000, "A"),
+            place(1_000_000_000, "discarded"),
+            place(10_000_000_000, "A"), place(10_250_000_000, "A"),
+            place(11_000_000_000, "discarded"),
+            place(15_000_000_000, "A"), place(15_250_000_000, "A"),
+        ];
+        assert_eq!(
+            super::deduplicate_history(history, 250_000_000, 15_000_000_000),
+            vec![place(0, "A"), place(15_000_000_000, "A")]
+        );
+    }
+
+    #[test]
+    fn deduplicate_history_only_compares_repeats_to_the_newest_entry() {
+        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
+            timestamp_ns, name: name.into(),
+        });
+        let history = vec![
+            place(0, "A"), place(250_000_000, "A"),
+            place(1_000_000_000, "B"), place(1_250_000_000, "B"),
+            place(2_000_000_000, "A"), place(2_250_000_000, "A"),
+            HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_000_000_000, name: "A".into() }),
+            HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_250_000_000, name: "A".into() }),
+        ];
+        assert_eq!(
+            super::deduplicate_history(history, 250_000_000, 15_000_000_000),
+            vec![
+                place(0, "A"), place(1_000_000_000, "B"), place(2_000_000_000, "A"),
+                HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_000_000_000, name: "A".into() }),
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicate_history_compares_both_act_fields_exactly() {
+        let act = |timestamp_ns, number: &str, title: &str| HistoryEntry::TextAct(super::TextAct {
+            timestamp_ns, actnumber: number.into(), acttitle: title.into(),
+        });
+        let history = vec![
+            act(0, "1", "Title"), act(250_000_000, "2", "Title"),
+            act(500_000_000, "2", "title"), act(750_000_000, "2", "Title"),
+            act(1_000_000_000, "2", "Title"),
+        ];
+        assert_eq!(
+            super::deduplicate_history(history, 250_000_000, 0),
+            vec![act(750_000_000, "2", "Title")]
+        );
+    }
 
     fn write_history_single_line(history: &super::History, output: &mut Vec<u8>) {
         super::write_history_single_line(history, output, 30, 1).unwrap();
@@ -2703,7 +2920,7 @@ mod tests {
             name: "Caria Manor".to_string(),
         })];
 
-        merge_history(&mut history, frame_history, 10_000_000_000);
+        merge_history(&mut history, frame_history, 10_000_000_000, true);
 
         assert_eq!(history.len(), 2);
     }
@@ -2718,11 +2935,12 @@ mod tests {
         };
         let mut history = vec![merchant(1_000_000_000)];
 
-        merge_history(&mut history, vec![merchant(5_000_000_000)], 10_000_000_000);
+        merge_history(&mut history, vec![merchant(5_000_000_000)], 10_000_000_000, true);
         merge_history(
             &mut history,
             vec![merchant(12_000_000_000)],
             10_000_000_000,
+            true,
         );
 
         assert_eq!(history.len(), 2);
@@ -2736,8 +2954,8 @@ mod tests {
             name: name.to_string(),
         });
         let mut history = vec![entry(0)];
-        merge_history(&mut history, vec![entry(5_000_000_000)], 10_000_000_000);
-        merge_history(&mut history, vec![entry(11_000_000_000)], 10_000_000_000);
+        merge_history(&mut history, vec![entry(5_000_000_000)], 10_000_000_000, true);
+        merge_history(&mut history, vec![entry(11_000_000_000)], 10_000_000_000, true);
         assert_eq!(history.len(), 2);
         let mut output = Vec::new();
         write_history_single_line(&history, &mut output);
@@ -2745,6 +2963,24 @@ mod tests {
             String::from_utf8(output).unwrap(),
             format!("0:00         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n0:11         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n")
         );
+    }
+
+    #[test]
+    fn merge_history_preserves_duplicates_when_dedup_mode_1_is_disabled() {
+        let entry = |timestamp_ns| HistoryEntry::Place2(Place2 {
+            timestamp_ns,
+            name: "Caria Manor".to_string(),
+        });
+        let mut history = vec![entry(0)];
+
+        merge_history(
+            &mut history,
+            vec![entry(0), entry(1_000_000_000)],
+            120_000_000_000,
+            false,
+        );
+
+        assert_eq!(history, vec![entry(0), entry(0), entry(1_000_000_000)]);
     }
 
     #[test]

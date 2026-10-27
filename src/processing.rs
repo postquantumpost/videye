@@ -1,6 +1,6 @@
 use crate::frame_processor::{
-    merge_history, process_frame, write_history, write_history_single_line, DetectorPriority, Game,
-    History, ProcessingState,
+    deduplicate_history, merge_history, process_frame, write_history, write_history_single_line,
+    DetectorPriority, Game, History, ProcessingState,
 };
 use crate::ghost::DetectorScratch;
 use crate::ocr_support::{OcrCache, OcrSession};
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 struct FrameProcessingResult {
     log: Vec<u8>,
@@ -207,6 +207,42 @@ fn frame_stride(skip: usize) -> u64 {
     u64::try_from(skip).unwrap_or(u64::MAX).saturating_add(1)
 }
 
+struct InputProgress {
+    total_frames: u128,
+    next_percent: u8,
+}
+
+impl InputProgress {
+    fn new(total_frames: u128) -> Self {
+        Self {
+            total_frames,
+            next_percent: 10,
+        }
+    }
+
+    fn report(
+        &mut self,
+        frames_read: u64,
+        end_of_input: bool,
+        output: &mut impl Write,
+    ) -> std::io::Result<()> {
+        while self.next_percent <= 100
+            && (end_of_input
+                || (self.next_percent < 100
+                    && u128::from(frames_read) * 100
+                        >= self.total_frames * u128::from(self.next_percent)))
+        {
+            writeln!(
+                output,
+                "Input read: {}% ({} frames).",
+                self.next_percent, frames_read
+            )?;
+            self.next_percent += 10;
+        }
+        Ok(())
+    }
+}
+
 pub fn process_files(
     input: &str,
     output: &str,
@@ -219,6 +255,10 @@ pub fn process_files(
     use_tesseract_library: bool,
     verbose: bool,
 ) -> Result<(), String> {
+    let dedup_mode_1 = false;
+    let dedup_mode_2 = true;
+    let dedup_seconds = 0.25;
+    let dedup_repeat_seconds = 15;
     let started_at = Instant::now();
     let message = match video_output {
         Some(video_output) => format!("Process {input} to {output} and {video_output}."),
@@ -230,7 +270,8 @@ pub fn process_files(
         .map_err(|error| format!("failed to write output file {output}: {error}"))?;
     println!("{message}");
 
-    let (width, height, frame_rate_num, frame_rate_den) = video_dimensions(input)?;
+    let (width, height, frame_rate_num, frame_rate_den, total_frames) = video_dimensions(input)?;
+    let mut progress = InputProgress::new(total_frames);
     let frame_size = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -361,9 +402,15 @@ pub fn process_files(
                         .pop()
                         .unwrap_or_else(|| vec![0; state.frame_size]);
                     let Some((current_frame, frame)) = decoder.next_frame(frame)? else {
+                        progress
+                            .report(decoder.input_frames_seen(), true, &mut std::io::stdout())
+                            .map_err(|error| format!("failed to write input progress: {error}"))?;
                         end_of_stream = true;
                         break;
                     };
+                    progress
+                        .report(current_frame + 1, false, &mut std::io::stdout())
+                        .map_err(|error| format!("failed to write input progress: {error}"))?;
                     job_sender
                         .send(FrameJob {
                             sequence: next_sequence,
@@ -399,6 +446,7 @@ pub fn process_files(
                         &mut history,
                         result.history,
                         u128::from(dedupe_seconds) * 1_000_000_000,
+                        dedup_mode_1,
                     );
                     state.current_frame += 1;
                 }
@@ -427,6 +475,14 @@ pub fn process_files(
                 "GStreamer video encoder exited with status {status}"
             ));
         }
+    }
+
+    if dedup_mode_2 {
+        history = deduplicate_history(
+            history,
+            Duration::from_secs_f64(dedup_seconds).as_nanos(),
+            Duration::from_secs(dedup_repeat_seconds).as_nanos(),
+        );
     }
 
     if verbose {
@@ -460,7 +516,55 @@ fn frame_should_be_kept(frame_index: u64, skip: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::frame_should_be_kept;
+    use super::{frame_should_be_kept, parse_duration_ns, InputProgress};
+
+    #[test]
+    fn reports_each_ten_percent_once_without_zero() {
+        let mut progress = InputProgress::new(100);
+        let mut output = Vec::new();
+        for frames in 0..=100 {
+            progress.report(frames, false, &mut output).unwrap();
+        }
+        let before_eof = String::from_utf8(output.clone()).unwrap();
+        assert_eq!(before_eof.lines().count(), 9);
+        assert!(!before_eof.contains("Input read: 0%"));
+        assert!(!before_eof.contains("Input read: 100%"));
+        progress.report(100, true, &mut output).unwrap();
+        progress.report(100, true, &mut output).unwrap();
+        let expected = (10..=100)
+            .step_by(10)
+            .map(|percent| format!("Input read: {percent}% ({percent} frames).\n"))
+            .collect::<String>();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+    }
+
+    #[test]
+    fn reports_crossed_thresholds_for_skipped_frames_and_short_inputs() {
+        for total_frames in [3, 100] {
+            let mut progress = InputProgress::new(total_frames);
+            let mut output = Vec::new();
+            progress.report(1, false, &mut output).unwrap();
+            progress.report(71, false, &mut output).unwrap();
+            progress.report(100, true, &mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let percentages = output
+                .lines()
+                .map(|line| line.split_whitespace().nth(2).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                percentages,
+                ["10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"]
+            );
+        }
+    }
+
+    #[test]
+    fn parses_video_duration_in_nanoseconds() {
+        assert_eq!(parse_duration_ns("1:02:03.123456789"), Some(3_723_123_456_789));
+        assert_eq!(parse_duration_ns("0:00:00.040"), Some(40_000_000));
+        assert_eq!(parse_duration_ns("unknown"), None);
+        assert_eq!(parse_duration_ns("0:00:00.1234567890"), None);
+    }
 
     #[test]
     fn keeps_every_n_plus_one_frame_from_the_source() {
@@ -560,7 +664,31 @@ fn start_video_encoder(
         .map_err(|error| format!("failed to start GStreamer video encoder: {error}"))
 }
 
-fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32), String> {
+fn parse_duration_ns(value: &str) -> Option<u128> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<u128>().ok()?;
+    let minutes = parts.next()?.parse::<u128>().ok()?;
+    let (seconds, fraction) = parts.next()?.split_once('.')?;
+    if parts.next().is_some()
+        || minutes >= 60
+        || fraction.is_empty()
+        || fraction.len() > 9
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let seconds = seconds.parse::<u128>().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
+    hours
+        .checked_mul(3_600)?
+        .checked_add(minutes * 60 + seconds)?
+        .checked_mul(1_000_000_000)?
+        .checked_add(fraction.parse::<u128>().ok()? * 10u128.pow(9 - fraction.len() as u32))
+}
+
+fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), String> {
     let result = Command::new("gst-discoverer-1.0")
         .arg(input)
         .output()
@@ -573,7 +701,14 @@ fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32), String> {
     let mut width = None;
     let mut height = None;
     let mut frame_rate = None;
+    let mut duration_ns = None;
     for line in details.lines() {
+        if duration_ns.is_none() {
+            duration_ns = line
+                .trim()
+                .strip_prefix("Duration:")
+                .and_then(|value| parse_duration_ns(value.trim()));
+        }
         if width.is_none() {
             width = line
                 .trim()
@@ -597,13 +732,19 @@ fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32), String> {
         }
     }
 
-    match (width, height, frame_rate) {
-        (Some(width), Some(height), Some((rate_num, rate_den)))
-            if width > 0 && height > 0 && rate_num > 0 && rate_den > 0 =>
+    match (width, height, frame_rate, duration_ns) {
+        (Some(width), Some(height), Some((rate_num, rate_den)), Some(duration_ns))
+            if width > 0 && height > 0 && rate_num > 0 && rate_den > 0 && duration_ns > 0 =>
         {
-            Ok((width, height, rate_num, rate_den))
+            let total_frames = duration_ns
+                .checked_mul(u128::from(rate_num))
+                .ok_or_else(|| format!("video duration is too large for {input}"))?
+                .div_ceil(1_000_000_000 * u128::from(rate_den));
+            Ok((width, height, rate_num, rate_den, total_frames))
         }
-        _ => Err(format!("could not determine video dimensions for {input}")),
+        _ => Err(format!(
+            "could not determine video dimensions, frame rate, or duration for {input}"
+        )),
     }
 }
 
