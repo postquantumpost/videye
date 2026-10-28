@@ -20,6 +20,6 @@ cargo install --path .
 #f=./samples/rest_at_grace.mp4
 #f=../samples/place_name.mp4
 #f=../samples/limgrave.mp4
-f=../samples/elleh.mp4
-#f=./samples/elden.mp4
+#f=../samples/elleh.mp4
+f=./samples/elden.mp4
 ./vebatcher $f

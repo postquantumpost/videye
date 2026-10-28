@@ -148,7 +148,12 @@ impl<'cache> OcrSession<'cache> {
         frame_number: u64,
     ) -> Option<String> {
         self.recognize_with_validator(
-            frame, frame_width, frame_height, crop, frame_number, is_valid_ocr_text,
+            frame,
+            frame_width,
+            frame_height,
+            crop,
+            frame_number,
+            is_valid_ocr_text,
         )
     }
 
@@ -161,7 +166,12 @@ impl<'cache> OcrSession<'cache> {
         frame_number: u64,
     ) -> Option<String> {
         self.recognize_with_validator(
-            frame, frame_width, frame_height, crop, frame_number, is_valid_item_name,
+            frame,
+            frame_width,
+            frame_height,
+            crop,
+            frame_number,
+            is_valid_item_name,
         )
     }
 
@@ -635,7 +645,9 @@ mod tests {
         let mut session = OcrSession::new(true, false, &cache);
         assert_eq!(session.recognize(&frame, 20, 5, &crop, 1), None);
         assert_eq!(
-            session.recognize_item_name(&frame, 20, 5, &crop, 1).as_deref(),
+            session
+                .recognize_item_name(&frame, 20, 5, &crop, 1)
+                .as_deref(),
             Some(name)
         );
     }

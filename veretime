@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+echo cargo install --path .
 cargo install --path .
 
 n=$(nproc)
@@ -9,6 +10,6 @@ for f in $*
 do
     echo ''
     echo process $f
-    #time videye --retime $f
+    echo time videye --retime $f
     time videye --retime $f
 done

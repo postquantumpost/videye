@@ -560,7 +560,10 @@ mod tests {
 
     #[test]
     fn parses_video_duration_in_nanoseconds() {
-        assert_eq!(parse_duration_ns("1:02:03.123456789"), Some(3_723_123_456_789));
+        assert_eq!(
+            parse_duration_ns("1:02:03.123456789"),
+            Some(3_723_123_456_789)
+        );
         assert_eq!(parse_duration_ns("0:00:00.040"), Some(40_000_000));
         assert_eq!(parse_duration_ns("unknown"), None);
         assert_eq!(parse_duration_ns("0:00:00.1234567890"), None);

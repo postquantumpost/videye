@@ -723,7 +723,8 @@ fn process_newitem_detector(
     history: &mut History,
     elapsed_ns: u128,
 ) -> io::Result<bool> {
-    let Some(detection) = find_newitem_detection(frame, state.frame_width, state.frame_height) else {
+    let Some(detection) = find_newitem_detection(frame, state.frame_width, state.frame_height)
+    else {
         return Ok(false);
     };
     if state.verbose {
@@ -733,13 +734,17 @@ fn process_newitem_detector(
             detection.lines[0].top, detection.lines[1].top, detection.lines[2].top
         )?;
     }
-    if ocr_session.recognize(
-        frame,
-        state.frame_width,
-        state.frame_height,
-        &detection.label,
-        state.current_frame,
-    ).as_deref() != Some("NEW") {
+    if ocr_session
+        .recognize(
+            frame,
+            state.frame_width,
+            state.frame_height,
+            &detection.label,
+            state.current_frame,
+        )
+        .as_deref()
+        != Some("NEW")
+    {
         return Ok(false);
     }
     let Some(name) = ocr_session.recognize_item_name(
@@ -1076,7 +1081,6 @@ fn add_textact_with_window(
     acttitle: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::TextAct(textact) => {
             textact.actnumber == actnumber
@@ -1113,7 +1117,6 @@ fn add_location2_with_window(
     location2: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::TextAct(_) => false,
         HistoryEntry::Location1(_) => false,
@@ -1148,7 +1151,6 @@ fn add_location1_with_window(
     location1: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::Location1(previous) => {
             previous.location1 == location1
@@ -1182,7 +1184,6 @@ fn add_story_with_window(
     text: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::Story(previous) => {
             previous.text == text
@@ -1217,7 +1218,6 @@ fn add_combat1_with_window(
     text: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::Combat1(previous) => {
             previous.text == text
@@ -1252,7 +1252,6 @@ fn add_grace_with_window(
     name: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::Grace(previous) => {
             previous.name == name
@@ -1367,7 +1366,6 @@ fn add_region_with_window(
     name: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| match entry {
         HistoryEntry::Region(previous) => {
             previous.name == name
@@ -1401,7 +1399,6 @@ fn add_lost_grace_discovered_with_window(
     timestamp_ns: u128,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| {
         matches!(entry, HistoryEntry::LostGraceDiscovered(previous)
             if timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
@@ -1423,7 +1420,6 @@ fn add_boss_with_window(
     name: String,
     dedupe_window_ns: u128,
 ) {
-
     let is_duplicate = history.iter().any(|entry| {
         matches!(entry, HistoryEntry::Boss(previous)
             if previous.name == name
@@ -1470,44 +1466,36 @@ pub(crate) fn merge_history(
                 textact.acttitle,
                 dedupe_window_ns,
             ),
-            HistoryEntry::Location1(location1) => {
-                add_location1_with_window(
-                    history,
-                    location1.timestamp_ns,
-                    location1.location1,
-                    dedupe_window_ns,
-                )
-            }
-            HistoryEntry::Location2(location2) => {
-                add_location2_with_window(
-                    history,
-                    location2.timestamp_ns,
-                    location2.location2,
-                    dedupe_window_ns,
-                )
-            }
+            HistoryEntry::Location1(location1) => add_location1_with_window(
+                history,
+                location1.timestamp_ns,
+                location1.location1,
+                dedupe_window_ns,
+            ),
+            HistoryEntry::Location2(location2) => add_location2_with_window(
+                history,
+                location2.timestamp_ns,
+                location2.location2,
+                dedupe_window_ns,
+            ),
             HistoryEntry::Story(story) => {
                 add_story_with_window(history, story.timestamp_ns, story.text, dedupe_window_ns)
             }
-            HistoryEntry::Combat1(combat1) => {
-                add_combat1_with_window(
-                    history,
-                    combat1.timestamp_ns,
-                    combat1.text,
-                    dedupe_window_ns,
-                )
-            }
+            HistoryEntry::Combat1(combat1) => add_combat1_with_window(
+                history,
+                combat1.timestamp_ns,
+                combat1.text,
+                dedupe_window_ns,
+            ),
             HistoryEntry::Grace(grace) => {
                 add_grace_with_window(history, grace.timestamp_ns, grace.name, dedupe_window_ns)
             }
-            HistoryEntry::Merchant(merchant) => {
-                add_merchant_with_window(
-                    history,
-                    merchant.timestamp_ns,
-                    merchant.name,
-                    dedupe_window_ns,
-                )
-            }
+            HistoryEntry::Merchant(merchant) => add_merchant_with_window(
+                history,
+                merchant.timestamp_ns,
+                merchant.name,
+                dedupe_window_ns,
+            ),
             HistoryEntry::Place2(place) => {
                 add_place2_with_window(history, place.timestamp_ns, place.name, dedupe_window_ns)
             }
@@ -1679,7 +1667,12 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 writeln!(output_file, "Grace: {}", grace.name)?;
             }
             HistoryEntry::Merchant(merchant) => {
-                write_place_verbose(output_file, "Merchant", merchant.timestamp_ns, &merchant.name)?;
+                write_place_verbose(
+                    output_file,
+                    "Merchant",
+                    merchant.timestamp_ns,
+                    &merchant.name,
+                )?;
             }
             HistoryEntry::Place2(place) => {
                 write_place_verbose(output_file, "Place2", place.timestamp_ns, &place.name)?;
@@ -1909,7 +1902,10 @@ pub(crate) fn write_history_single_line(
                     frame_rate_den,
                     &mut previous_real_timestamp_ns,
                 );
-                writeln!(output_file, "{timestamp}       Lost Grace Discovered {frame}")?;
+                writeln!(
+                    output_file,
+                    "{timestamp}       Lost Grace Discovered {frame}"
+                )?;
             }
             HistoryEntry::Region(region) => {
                 let (timestamp, frame) = format_history_timestamp_with_spacing(
@@ -2112,7 +2108,7 @@ fn set_red_pixel(frame: &mut [u8], frame_width: usize, x: usize, y: usize) {
 mod tests {
     use super::{
         add_boss, add_combat1, add_grace, add_location1, add_location2, add_lost_grace_discovered,
-        add_merchant, add_place2, add_place1, add_place3, add_region, add_story, add_textact,
+        add_merchant, add_place1, add_place2, add_place3, add_region, add_story, add_textact,
         merge_history, BoundingBox, Detector, DetectorPriority, EldenDetector, HistoryEntry,
         Place2,
     };
@@ -2120,75 +2116,136 @@ mod tests {
     #[test]
     fn deduplicate_history_checks_duration_for_every_detection_type() {
         let constructors: [fn(u128) -> HistoryEntry; 14] = [
-            |timestamp_ns| HistoryEntry::TextAct(super::TextAct {
-                timestamp_ns, actnumber: "1".into(), acttitle: "Title".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Location1(super::Location1 {
-                timestamp_ns, location1: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Location2(super::Location2 {
-                timestamp_ns, location2: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Story(super::Story {
-                timestamp_ns, text: "Text".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Combat1(super::Combat1 {
-                timestamp_ns, text: "Text".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Grace(super::Grace {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Merchant(super::Merchant {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Place2(super::Place2 {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Place1(super::Place1 {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Place3(super::Place3 {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::LostGraceDiscovered(super::LostGraceDiscovered {
-                timestamp_ns,
-            }),
-            |timestamp_ns| HistoryEntry::Region(super::Region {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::Boss(super::Boss {
-                timestamp_ns, name: "Name".into(),
-            }),
-            |timestamp_ns| HistoryEntry::NewItem(super::NewItem {
-                timestamp_ns, name: "Name".into(),
-            }),
+            |timestamp_ns| {
+                HistoryEntry::TextAct(super::TextAct {
+                    timestamp_ns,
+                    actnumber: "1".into(),
+                    acttitle: "Title".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Location1(super::Location1 {
+                    timestamp_ns,
+                    location1: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Location2(super::Location2 {
+                    timestamp_ns,
+                    location2: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Story(super::Story {
+                    timestamp_ns,
+                    text: "Text".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Combat1(super::Combat1 {
+                    timestamp_ns,
+                    text: "Text".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Grace(super::Grace {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Merchant(super::Merchant {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Place2(super::Place2 {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Place1(super::Place1 {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Place3(super::Place3 {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::LostGraceDiscovered(super::LostGraceDiscovered { timestamp_ns })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Region(super::Region {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::Boss(super::Boss {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
+            |timestamp_ns| {
+                HistoryEntry::NewItem(super::NewItem {
+                    timestamp_ns,
+                    name: "Name".into(),
+                })
+            },
         ];
         let threshold = 250_000_000;
         for entry in constructors {
             for span in [threshold - 1, threshold, threshold + 1] {
-                let history = vec![entry(1_000_000_000), entry(1_100_000_000), entry(1_000_000_000 + span)];
+                let history = vec![
+                    entry(1_000_000_000),
+                    entry(1_100_000_000),
+                    entry(1_000_000_000 + span),
+                ];
                 let result = super::deduplicate_history(history, threshold, 0);
-                let expected = if span >= threshold { vec![entry(1_000_000_000)] } else { vec![] };
+                let expected = if span >= threshold {
+                    vec![entry(1_000_000_000)]
+                } else {
+                    vec![]
+                };
                 assert_eq!(result, expected);
             }
             assert!(super::deduplicate_history(vec![entry(0)], threshold, 0).is_empty());
-            assert_eq!(super::deduplicate_history(vec![entry(0)], 0, 0), vec![entry(0)]);
+            assert_eq!(
+                super::deduplicate_history(vec![entry(0)], 0, 0),
+                vec![entry(0)]
+            );
         }
         assert!(super::deduplicate_history(vec![], threshold, 0).is_empty());
     }
 
     #[test]
     fn deduplicate_history_does_not_join_groups_across_different_text_or_types() {
-        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
-            timestamp_ns, name: name.into(),
-        });
-        let other_type = |timestamp_ns| HistoryEntry::Place1(super::Place1 {
-            timestamp_ns, name: "A".into(),
-        });
+        let place = |timestamp_ns, name: &str| {
+            HistoryEntry::Place2(Place2 {
+                timestamp_ns,
+                name: name.into(),
+            })
+        };
+        let other_type = |timestamp_ns| {
+            HistoryEntry::Place1(super::Place1 {
+                timestamp_ns,
+                name: "A".into(),
+            })
+        };
         let history = vec![
-            place(0, "A"), place(250_000_000, "B"), place(500_000_000, "A"),
-            other_type(750_000_000), place(1_000_000_000, "A"),
-            place(1_250_000_000, "A"), place(1_500_000_000, "B"),
+            place(0, "A"),
+            place(250_000_000, "B"),
+            place(500_000_000, "A"),
+            other_type(750_000_000),
+            place(1_000_000_000, "A"),
+            place(1_250_000_000, "A"),
+            place(1_500_000_000, "B"),
             place(1_750_000_000, "B"),
         ];
         assert_eq!(
@@ -2199,16 +2256,21 @@ mod tests {
 
     #[test]
     fn deduplicate_history_suppresses_repeats_strictly_inside_the_window() {
-        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
-            timestamp_ns, name: name.into(),
-        });
+        let place = |timestamp_ns, name: &str| {
+            HistoryEntry::Place2(Place2 {
+                timestamp_ns,
+                name: name.into(),
+            })
+        };
         let threshold = 250_000_000;
         let repeat_window = 15_000_000_000;
         for gap in [repeat_window - 1, repeat_window, repeat_window + 1] {
             let history = vec![
-                place(0, "A"), place(threshold, "A"),
+                place(0, "A"),
+                place(threshold, "A"),
                 place(500_000_000, "discarded"),
-                place(gap, "A"), place(gap + threshold, "A"),
+                place(gap, "A"),
+                place(gap + threshold, "A"),
             ];
             let expected = if gap < repeat_window {
                 vec![place(0, "A")]
@@ -2224,15 +2286,21 @@ mod tests {
 
     #[test]
     fn deduplicate_history_compares_repeats_to_last_retained_timestamp() {
-        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
-            timestamp_ns, name: name.into(),
-        });
+        let place = |timestamp_ns, name: &str| {
+            HistoryEntry::Place2(Place2 {
+                timestamp_ns,
+                name: name.into(),
+            })
+        };
         let history = vec![
-            place(0, "A"), place(250_000_000, "A"),
+            place(0, "A"),
+            place(250_000_000, "A"),
             place(1_000_000_000, "discarded"),
-            place(10_000_000_000, "A"), place(10_250_000_000, "A"),
+            place(10_000_000_000, "A"),
+            place(10_250_000_000, "A"),
             place(11_000_000_000, "discarded"),
-            place(15_000_000_000, "A"), place(15_250_000_000, "A"),
+            place(15_000_000_000, "A"),
+            place(15_250_000_000, "A"),
         ];
         assert_eq!(
             super::deduplicate_history(history, 250_000_000, 15_000_000_000),
@@ -2242,33 +2310,56 @@ mod tests {
 
     #[test]
     fn deduplicate_history_only_compares_repeats_to_the_newest_entry() {
-        let place = |timestamp_ns, name: &str| HistoryEntry::Place2(Place2 {
-            timestamp_ns, name: name.into(),
-        });
+        let place = |timestamp_ns, name: &str| {
+            HistoryEntry::Place2(Place2 {
+                timestamp_ns,
+                name: name.into(),
+            })
+        };
         let history = vec![
-            place(0, "A"), place(250_000_000, "A"),
-            place(1_000_000_000, "B"), place(1_250_000_000, "B"),
-            place(2_000_000_000, "A"), place(2_250_000_000, "A"),
-            HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_000_000_000, name: "A".into() }),
-            HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_250_000_000, name: "A".into() }),
+            place(0, "A"),
+            place(250_000_000, "A"),
+            place(1_000_000_000, "B"),
+            place(1_250_000_000, "B"),
+            place(2_000_000_000, "A"),
+            place(2_250_000_000, "A"),
+            HistoryEntry::Place1(super::Place1 {
+                timestamp_ns: 3_000_000_000,
+                name: "A".into(),
+            }),
+            HistoryEntry::Place1(super::Place1 {
+                timestamp_ns: 3_250_000_000,
+                name: "A".into(),
+            }),
         ];
         assert_eq!(
             super::deduplicate_history(history, 250_000_000, 15_000_000_000),
             vec![
-                place(0, "A"), place(1_000_000_000, "B"), place(2_000_000_000, "A"),
-                HistoryEntry::Place1(super::Place1 { timestamp_ns: 3_000_000_000, name: "A".into() }),
+                place(0, "A"),
+                place(1_000_000_000, "B"),
+                place(2_000_000_000, "A"),
+                HistoryEntry::Place1(super::Place1 {
+                    timestamp_ns: 3_000_000_000,
+                    name: "A".into()
+                }),
             ]
         );
     }
 
     #[test]
     fn deduplicate_history_compares_both_act_fields_exactly() {
-        let act = |timestamp_ns, number: &str, title: &str| HistoryEntry::TextAct(super::TextAct {
-            timestamp_ns, actnumber: number.into(), acttitle: title.into(),
-        });
+        let act = |timestamp_ns, number: &str, title: &str| {
+            HistoryEntry::TextAct(super::TextAct {
+                timestamp_ns,
+                actnumber: number.into(),
+                acttitle: title.into(),
+            })
+        };
         let history = vec![
-            act(0, "1", "Title"), act(250_000_000, "2", "Title"),
-            act(500_000_000, "2", "title"), act(750_000_000, "2", "Title"),
+            act(0, "1", "Title"),
+            act(250_000_000, "2", "Title"),
+            act(500_000_000, "2", "title"),
+            act(750_000_000, "2", "Title"),
             act(1_000_000_000, "2", "Title"),
         ];
         assert_eq!(
@@ -2431,10 +2522,7 @@ mod tests {
 
         super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
 
-        assert_eq!(
-            output,
-            "0:00 begin\n0։02 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes()
-        );
+        assert_eq!(output, "0:00 begin\n0։02 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
     }
 
     #[test]
@@ -2511,10 +2599,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(
-            output,
-            "0:00 begin\n0։02 RYUZO ⁰ ᶜᵒᵐᵇᵃᵗ¹\n".as_bytes()
-        );
+        assert_eq!(output, "0:00 begin\n0։02 RYUZO ⁰ ᶜᵒᵐᵇᵃᵗ¹\n".as_bytes());
     }
 
     #[test]
@@ -2553,7 +2638,10 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, "0:00 begin\n0։02   Caria Manor ⁰ ᵖˡᵃᶜᵉ²\n".as_bytes());
+        assert_eq!(
+            output,
+            "0:00 begin\n0։02   Caria Manor ⁰ ᵖˡᵃᶜᵉ²\n".as_bytes()
+        );
     }
 
     #[test]
@@ -2584,7 +2672,8 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02       Lost Grace Discovered ⁰\n2:02       Lost Grace Discovered ⁰\n".as_bytes()
+            "0:00 begin\n0։02       Lost Grace Discovered ⁰\n2:02       Lost Grace Discovered ⁰\n"
+                .as_bytes()
         );
     }
 
@@ -2612,7 +2701,8 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n2:02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n".as_bytes()
+            "0:00 begin\n0։02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n2:02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n"
+                .as_bytes()
         );
     }
 
@@ -2935,7 +3025,12 @@ mod tests {
         };
         let mut history = vec![merchant(1_000_000_000)];
 
-        merge_history(&mut history, vec![merchant(5_000_000_000)], 10_000_000_000, true);
+        merge_history(
+            &mut history,
+            vec![merchant(5_000_000_000)],
+            10_000_000_000,
+            true,
+        );
         merge_history(
             &mut history,
             vec![merchant(12_000_000_000)],
@@ -2949,13 +3044,25 @@ mod tests {
     #[test]
     fn newitem_history_preserves_utf8_and_uses_the_dedupe_window() {
         let name = "\u{00c9}p\u{00e9}e, d'acier [5]-2";
-        let entry = |timestamp_ns| HistoryEntry::NewItem(super::NewItem {
-            timestamp_ns,
-            name: name.to_string(),
-        });
+        let entry = |timestamp_ns| {
+            HistoryEntry::NewItem(super::NewItem {
+                timestamp_ns,
+                name: name.to_string(),
+            })
+        };
         let mut history = vec![entry(0)];
-        merge_history(&mut history, vec![entry(5_000_000_000)], 10_000_000_000, true);
-        merge_history(&mut history, vec![entry(11_000_000_000)], 10_000_000_000, true);
+        merge_history(
+            &mut history,
+            vec![entry(5_000_000_000)],
+            10_000_000_000,
+            true,
+        );
+        merge_history(
+            &mut history,
+            vec![entry(11_000_000_000)],
+            10_000_000_000,
+            true,
+        );
         assert_eq!(history.len(), 2);
         let mut output = Vec::new();
         write_history_single_line(&history, &mut output);
@@ -2967,10 +3074,12 @@ mod tests {
 
     #[test]
     fn merge_history_preserves_duplicates_when_dedup_mode_1_is_disabled() {
-        let entry = |timestamp_ns| HistoryEntry::Place2(Place2 {
-            timestamp_ns,
-            name: "Caria Manor".to_string(),
-        });
+        let entry = |timestamp_ns| {
+            HistoryEntry::Place2(Place2 {
+                timestamp_ns,
+                name: "Caria Manor".to_string(),
+            })
+        };
         let mut history = vec![entry(0)];
 
         merge_history(
@@ -2989,27 +3098,40 @@ mod tests {
         let output = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/lizard.png"))
-            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "{}", String::from_utf8_lossy(&output.stderr)
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
         let (width, height) = (3_840, 2_160);
         let frame = output.stdout;
         assert_eq!(frame.len(), width * height * 4);
-        let detection = super::find_newitem_detection(&frame, width, height)
-            .expect("three separator lines");
+        let detection =
+            super::find_newitem_detection(&frame, width, height).expect("three separator lines");
         for use_library in [true, false] {
             let cache = crate::ocr_support::OcrCache::default();
             let mut session = crate::ocr_support::OcrSession::new(use_library, false, &cache);
             assert_eq!(
-                session.recognize(&frame, width, height, &detection.label, 1).as_deref(),
+                session
+                    .recognize(&frame, width, height, &detection.label, 1)
+                    .as_deref(),
                 Some("NEW")
             );
             assert_eq!(
-                session.recognize_item_name(&frame, width, height, &detection.name, 1).as_deref(),
+                session
+                    .recognize_item_name(&frame, width, height, &detection.name, 1)
+                    .as_deref(),
                 Some("Lizard Greatsword")
             );
             let mut state = super::ProcessingState {
@@ -3033,7 +3155,8 @@ mod tests {
                 &mut crate::ghost::DetectorScratch::default(),
                 &super::DetectorPriority::default(),
                 &mut history,
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(
                 history,
                 vec![HistoryEntry::NewItem(super::NewItem {
@@ -3052,9 +3175,15 @@ mod tests {
             assert!(super::find_newitem_detection(&without_new, width, height).is_some());
             let mut history = Vec::new();
             assert!(!super::process_newitem_detector(
-                &state, &without_new, &mut Vec::new(), &mut None,
-                &mut session, &mut history, 0,
-            ).unwrap());
+                &state,
+                &without_new,
+                &mut Vec::new(),
+                &mut None,
+                &mut session,
+                &mut history,
+                0,
+            )
+            .unwrap());
             assert!(history.is_empty());
         }
     }
@@ -3062,7 +3191,11 @@ mod tests {
     fn decode_sample_png(name: &str) -> (Vec<u8>, usize, usize) {
         let output = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
-            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples").join(name))
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("samples")
+                    .join(name),
+            )
             .args([
                 "-frames:v",
                 "1",

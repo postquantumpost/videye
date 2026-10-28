@@ -78,7 +78,8 @@ pub(crate) fn find_newitem_detection(
                     let luma = frame[pixel..pixel + 3]
                         .iter()
                         .map(|value| u32::from(*value))
-                        .sum::<u32>() / 3;
+                        .sum::<u32>()
+                        / 3;
                     luma <= 90 && gray >= luma + 10
                 };
                 if (index == 0 || dark(y - offset)) && (index == 2 || dark(y + offset)) {
@@ -257,9 +258,14 @@ pub(crate) fn find_grace_detection(
         .max(5)
         .min(height - label_top);
     let mut label_width = (width.saturating_mul(26) / 100).min(width - label_left);
-    if let Some(text_width) =
-        grace_label_text_width(frame, width, label_left, label_top, label_width, label_height)
-    {
+    if let Some(text_width) = grace_label_text_width(
+        frame,
+        width,
+        label_left,
+        label_top,
+        label_width,
+        label_height,
+    ) {
         label_width = label_width.min(text_width + label_height / 2);
     }
     (label_width >= 20 && label_height >= 5).then(|| {
@@ -341,7 +347,9 @@ fn grace_label_text_width(
             .max()
             .unwrap_or(0)
     };
-    let peaks = (left..left + label_width).map(column_peak).collect::<Vec<_>>();
+    let peaks = (left..left + label_width)
+        .map(column_peak)
+        .collect::<Vec<_>>();
     let text_luma = *peaks[..peaks.len().min(label_height * 2)].iter().max()?;
     if text_luma < 128 {
         return None;
@@ -623,9 +631,9 @@ fn find_place_banner(
             group_start = index;
         }
     }
-    let strokes = groups.into_iter().max_by_key(|group| {
-        group.iter().map(|(begin, end)| end - begin).sum::<usize>()
-    })?;
+    let strokes = groups
+        .into_iter()
+        .max_by_key(|group| group.iter().map(|(begin, end)| end - begin).sum::<usize>())?;
     let first = strokes.first()?.0;
     let last = strokes.last()?.1;
     let stroke_width: usize = strokes.iter().map(|(begin, end)| end - begin).sum();
@@ -1514,7 +1522,8 @@ fn is_border_pixel(
 mod tests {
     use super::{
         find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-        find_place1_detection, find_place2_detection, find_region2_detection, place_banner_text_image,
+        find_place1_detection, find_place2_detection, find_region2_detection,
+        place_banner_text_image,
     };
 
     #[test]
@@ -1527,7 +1536,11 @@ mod tests {
                 for column in width * 42 / 100..width * 58 / 100 {
                     set_pixel(&mut frame, width, column, top, [100, 100, 100, 255]);
                     if index != 1 {
-                        let exterior = if index == 0 { top - offset } else { top + offset };
+                        let exterior = if index == 0 {
+                            top - offset
+                        } else {
+                            top + offset
+                        };
                         set_pixel(&mut frame, width, column, exterior, [240, 30, 180, 255]);
                     }
                 }
@@ -1544,7 +1557,9 @@ mod tests {
             }
             for (index, direction) in [(0, 1isize), (1, -1), (1, 1), (2, -1)] {
                 let mut incorrect = frame.clone();
-                let row = positions[index].checked_add_signed(direction * offset as isize).unwrap();
+                let row = positions[index]
+                    .checked_add_signed(direction * offset as isize)
+                    .unwrap();
                 for column in width * 42 / 100..width * 58 / 100 {
                     set_pixel(&mut incorrect, width, column, row, [240, 30, 180, 255]);
                 }
