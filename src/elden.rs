@@ -12,6 +12,12 @@ pub(crate) enum GraceSymbolKind {
     Merchant,
 }
 
+pub(crate) struct SystemDetection {
+    pub(crate) symbol: BoundingBox,
+    pub(crate) label: BoundingBox,
+    pub(crate) heading: BoundingBox,
+}
+
 pub(crate) struct PlaceBannerDetection {
     pub(crate) line: BoundingBox,
     pub(crate) banner: BoundingBox,
@@ -64,6 +70,9 @@ pub(crate) fn find_newitem_detection(
             }
             let mut support = 0;
             for sample in 0..64 {
+                if support + 64 - sample < 48 {
+                    break;
+                }
                 let column = left + sample * span / 64;
                 let pixel = (y * width + column) * 4;
                 let channels = &frame[pixel..pixel + 3];
@@ -127,6 +136,98 @@ pub(crate) fn find_grace_detection(
     width: usize,
     height: usize,
 ) -> Option<GraceDetection> {
+    let symbol = find_icon_box(
+        frame,
+        width,
+        height,
+        width.saturating_mul(25) / 1_000,
+        height.saturating_mul(12) / 100,
+    )?;
+    let label = icon_box_label(frame, width, height, &symbol)?;
+    let kind = classify_grace_symbol(frame, width, &symbol);
+    Some(GraceDetection {
+        symbol,
+        label,
+        kind,
+    })
+}
+
+/// Finds the system menu icon box at the top left and the "System" label beside it. The
+/// `heading` region covers the menu tab title shown below the box, e.g. "Camera Options".
+pub(crate) fn find_system_detection(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<SystemDetection> {
+    let symbol = find_icon_box(
+        frame,
+        width,
+        height,
+        width.saturating_mul(26) / 1_000,
+        height.saturating_mul(25) / 1_000,
+    )?;
+    let label = icon_box_label(frame, width, height, &symbol)?;
+    let heading_top = height.saturating_mul(98) / 1_000;
+    let heading = BoundingBox {
+        left: width.saturating_mul(185) / 1_000,
+        top: heading_top,
+        width: width.saturating_mul(150) / 1_000,
+        height: (height.saturating_mul(42) / 1_000).max(5),
+    };
+    (heading.top + heading.height <= height && heading.left + heading.width <= width).then_some(
+        SystemDetection {
+            symbol,
+            label,
+            heading,
+        },
+    )
+}
+
+fn icon_box_label(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    symbol: &BoundingBox,
+) -> Option<BoundingBox> {
+    let label_left = symbol
+        .left
+        .saturating_add(symbol.width)
+        .saturating_add((width.saturating_mul(8) / 1_000).max(2));
+    let label_top = symbol
+        .top
+        .saturating_add(symbol.height.saturating_mul(15) / 100);
+    if label_left >= width || label_top >= height {
+        return None;
+    }
+    let label_height = (symbol.height.saturating_mul(75) / 100)
+        .max(5)
+        .min(height - label_top);
+    let mut label_width = (width.saturating_mul(26) / 100).min(width - label_left);
+    if let Some(text_width) = grace_label_text_width(
+        frame,
+        width,
+        label_left,
+        label_top,
+        label_width,
+        label_height,
+    ) {
+        label_width = label_width.min(text_width + label_height / 2);
+    }
+    (label_width >= 20 && label_height >= 5).then_some(BoundingBox {
+        left: label_left,
+        top: label_top,
+        width: label_width,
+        height: label_height,
+    })
+}
+
+fn find_icon_box(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    expected_left: usize,
+    expected_top: usize,
+) -> Option<BoundingBox> {
     let expected_len = width.checked_mul(height)?.checked_mul(4)?;
     if width == 0 || height == 0 || frame.len() < expected_len {
         return None;
@@ -142,8 +243,6 @@ pub(crate) fn find_grace_detection(
         return None;
     }
 
-    let expected_left = width.saturating_mul(25) / 1_000;
-    let expected_top = height.saturating_mul(12) / 100;
     let x_radius = (width.saturating_mul(12) / 1_000).max(2);
     let y_radius = (height.saturating_mul(15) / 1_000).max(2);
     let position_step = (expected_size / 12).max(1);
@@ -243,44 +342,7 @@ pub(crate) fn find_grace_detection(
         }
     }
 
-    let (_, symbol) = best?;
-    let label_left = symbol
-        .left
-        .saturating_add(symbol.width)
-        .saturating_add((width.saturating_mul(8) / 1_000).max(2));
-    let label_top = symbol
-        .top
-        .saturating_add(symbol.height.saturating_mul(15) / 100);
-    if label_left >= width || label_top >= height {
-        return None;
-    }
-    let label_height = (symbol.height.saturating_mul(75) / 100)
-        .max(5)
-        .min(height - label_top);
-    let mut label_width = (width.saturating_mul(26) / 100).min(width - label_left);
-    if let Some(text_width) = grace_label_text_width(
-        frame,
-        width,
-        label_left,
-        label_top,
-        label_width,
-        label_height,
-    ) {
-        label_width = label_width.min(text_width + label_height / 2);
-    }
-    (label_width >= 20 && label_height >= 5).then(|| {
-        let kind = classify_grace_symbol(frame, width, &symbol);
-        GraceDetection {
-            symbol,
-            label: BoundingBox {
-                left: label_left,
-                top: label_top,
-                width: label_width,
-                height: label_height,
-            },
-            kind,
-        }
-    })
+    best.map(|(_, symbol)| symbol)
 }
 
 fn classify_grace_symbol(frame: &[u8], width: usize, symbol: &BoundingBox) -> GraceSymbolKind {
@@ -398,6 +460,8 @@ struct BannerLayout {
     descender: usize,
     /// Horizontal padding added to each side of the detected text strokes.
     padding: usize,
+    /// Percentage the padded OCR crop is widened by, split evenly between both sides.
+    text_widen_percent: usize,
     /// Brightness that fully faded-in text reaches; fading text is skipped to avoid garbled OCR.
     min_text_luma: u32,
     columns_left: usize,
@@ -416,6 +480,8 @@ const PLACE1_LAYOUT: BannerLayout = BannerLayout {
     text_height: 750,
     descender: 200,
     padding: 400,
+    // Wider crop so the first and last letters are not cut off.
+    text_widen_percent: 10,
     min_text_luma: 240,
     columns_left: 3_600,
     columns_right: 6_400,
@@ -434,6 +500,7 @@ const PLACE2_LAYOUT: BannerLayout = BannerLayout {
     text_height: 550,
     descender: 120,
     padding: 200,
+    text_widen_percent: 0,
     min_text_luma: 220,
     columns_left: 3_990,
     columns_right: 6_010,
@@ -451,6 +518,7 @@ const PLACE3_LAYOUT: BannerLayout = BannerLayout {
     text_height: 510,
     descender: 120,
     padding: 200,
+    text_widen_percent: 0,
     // The thinner strokes are anti-aliased and peak lower than the large place1 text.
     min_text_luma: 220,
     columns_left: 3_800,
@@ -504,7 +572,10 @@ fn find_place_banner(
     let expected_line = vertical(layout.line);
     let line_radius = height * 6 / 1_000;
     let mut line_hits = Vec::with_capacity(BANNER_SAMPLES);
-    for &x in &columns {
+    for (index, &x) in columns.iter().enumerate() {
+        if line_hits.len() + BANNER_SAMPLES - index < BANNER_MIN_BOTTOM_HITS {
+            return None;
+        }
         let mut best: Option<(u32, usize)> = None;
         for y in expected_line - line_radius..=expected_line + line_radius {
             let line = banner_column_luma(
@@ -525,7 +596,13 @@ fn find_place_banner(
                 y - scaled(12),
                 y - scaled(7),
             );
-            let scene = banner_column_luma(
+            let (Some(line), Some(dark)) = (line, dark) else {
+                continue;
+            };
+            if line < dark + 12 {
+                continue;
+            }
+            let Some(scene) = banner_column_luma(
                 frame,
                 width,
                 height,
@@ -533,11 +610,10 @@ fn find_place_banner(
                 half_width,
                 y + scaled(9),
                 y + scaled(15),
-            );
-            let (Some(line), Some(dark), Some(scene)) = (line, dark, scene) else {
+            ) else {
                 continue;
             };
-            if line >= dark + 12 && scene >= dark + 8 && line + 25 >= scene {
+            if scene >= dark + 8 && line + 25 >= scene {
                 let contrast = line - dark;
                 if best.is_none_or(|(best_contrast, _)| contrast > best_contrast) {
                     best = Some((contrast, y));
@@ -554,7 +630,10 @@ fn find_place_banner(
     let expected_top = line_y.checked_sub(vertical(layout.band_height))?;
     let top_radius = height * 8 / 1_000;
     let mut top_hits = Vec::with_capacity(BANNER_SAMPLES);
-    for &x in &columns {
+    for (index, &x) in columns.iter().enumerate() {
+        if top_hits.len() + BANNER_SAMPLES - index < BANNER_MIN_TOP_HITS {
+            return None;
+        }
         let mut best: Option<(u32, usize)> = None;
         for y in expected_top.saturating_sub(top_radius)..=expected_top + top_radius {
             let light = banner_column_luma(
@@ -648,8 +727,9 @@ fn find_place_banner(
     }
 
     let padding = vertical(layout.padding);
-    let text_left = (scan_left + first).saturating_sub(padding);
-    let text_right = (scan_left + last + padding).min(width);
+    let widen = (last - first + 2 * padding) * layout.text_widen_percent / 200;
+    let text_left = (scan_left + first).saturating_sub(padding + widen);
+    let text_right = (scan_left + last + padding + widen).min(width);
     let text_top = top_y.max(line_y.checked_sub(vertical(layout.text_height))?);
     let text_bottom = (line_y + vertical(layout.descender)).min(height);
     if text_top >= line_y || text_right <= text_left {
@@ -752,6 +832,171 @@ pub(crate) fn place_banner_text_image(
             }
         })
         .collect()
+}
+
+/// Finds the multiplayer message banner low in the frame, such as "Invaded by Millicent!": a
+/// translucent dark band spanning the middle half of the frame with a soft top edge and a grey
+/// line along its bottom, and centred bright text. Distances are in 2160-line pixels.
+pub(crate) fn find_invaded_detection(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<PlaceBannerDetection> {
+    const SAMPLES: usize = 32;
+    let expected_len = width.checked_mul(height)?.checked_mul(4)?;
+    if width < 100 || height < 100 || frame.len() < expected_len {
+        return None;
+    }
+    let scaled = |value: usize| (value * height / 2_160).max(1);
+    let horizontal = |value: usize| width * value / 10_000;
+    let columns_left = horizontal(3_000);
+    let columns_span = horizontal(7_000) - columns_left;
+    let columns: Vec<usize> = (0..SAMPLES)
+        .map(|index| columns_left + columns_span * index / (SAMPLES - 1))
+        .collect();
+    let half_width = scaled(2);
+    let luma = |x: usize, top: usize, bottom: usize| {
+        banner_column_luma(frame, width, height, x, half_width, top, bottom)
+    };
+
+    // Bottom edge: a grey line just below the dark band.
+    let expected_line = height * 7_347 / 10_000;
+    let line_radius = scaled(12);
+    let mut line_hits = Vec::with_capacity(SAMPLES);
+    for (index, &x) in columns.iter().enumerate() {
+        if line_hits.len() + SAMPLES - index < SAMPLES * 3 / 4 {
+            return None;
+        }
+        let mut best: Option<(u32, usize)> = None;
+        for y in expected_line - line_radius..=expected_line + line_radius {
+            let Some(dark) = luma(x, y - scaled(14), y - scaled(8)) else {
+                continue;
+            };
+            if dark > 70 {
+                continue;
+            }
+            let Some(line) = luma(x, y - scaled(2), y + scaled(2) + 1) else {
+                continue;
+            };
+            if line >= dark + 15 {
+                let contrast = line - dark;
+                if best.is_none_or(|(best_contrast, _)| contrast > best_contrast) {
+                    best = Some((contrast, y));
+                }
+            }
+        }
+        if let Some((_, y)) = best {
+            line_hits.push(y);
+        }
+    }
+    let line_y = banner_consensus(&mut line_hits, scaled(3), SAMPLES * 3 / 4)?;
+
+    // The band between the edges is uniformly dark, apart from the text rows, and the scene above
+    // the soft top edge is brighter.
+    let top_y = line_y.checked_sub(scaled(97))?;
+    let mut band_columns = 0;
+    let mut top_hits = 0;
+    for (index, &x) in columns.iter().enumerate() {
+        let remaining = SAMPLES - index;
+        if band_columns + remaining < SAMPLES * 7 / 8 || top_hits + remaining < SAMPLES / 2 {
+            return None;
+        }
+        let (Some(above), Some(upper), Some(lower)) = (
+            luma(x, top_y.checked_sub(scaled(14))?, top_y - scaled(6)),
+            luma(x, top_y + scaled(10), top_y + scaled(26)),
+            luma(x, line_y - scaled(14), line_y - scaled(8)),
+        ) else {
+            return None;
+        };
+        band_columns += usize::from(upper <= 70 && lower <= 70 && upper.abs_diff(lower) <= 20);
+        top_hits += usize::from(above >= upper + 10);
+    }
+    if band_columns < SAMPLES * 7 / 8 || top_hits < SAMPLES / 2 {
+        return None;
+    }
+
+    // Text: bright strokes across the middle of the lower-case letters, centred in the frame. The
+    // message can be roughly twice as wide as "Invaded by Millicent!", so scan the whole band.
+    let middle = line_y - scaled(42);
+    let scan_left = horizontal(2_500);
+    let scan_right = horizontal(7_500);
+    let column_luma: Vec<u32> = (scan_left..scan_right)
+        .map(|x| {
+            (middle - scaled(3)..=middle + scaled(3))
+                .filter_map(|y| banner_text_luma(frame, width, x, y))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let text_luma = column_luma.iter().copied().max()?;
+    // Fading text is skipped to avoid garbled OCR.
+    if text_luma < 220 {
+        return None;
+    }
+    let threshold = text_luma - BANNER_TEXT_LUMA_RANGE;
+    let mut strokes = Vec::new();
+    let mut start = None;
+    for (offset, &luma) in column_luma.iter().chain(std::iter::once(&0)).enumerate() {
+        match (luma >= threshold, start) {
+            (true, None) => start = Some(offset),
+            (false, Some(first)) => {
+                strokes.push((first, offset));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    let max_gap = scaled(120);
+    let mut groups: Vec<&[(usize, usize)]> = Vec::new();
+    let mut group_start = 0;
+    for index in 1..=strokes.len() {
+        if index == strokes.len() || strokes[index].0 - strokes[index - 1].1 > max_gap {
+            groups.push(&strokes[group_start..index]);
+            group_start = index;
+        }
+    }
+    let strokes = groups
+        .into_iter()
+        .max_by_key(|group| group.iter().map(|(begin, end)| end - begin).sum::<usize>())?;
+    let first = strokes.first()?.0;
+    let last = strokes.last()?.1;
+    let stroke_width: usize = strokes.iter().map(|(begin, end)| end - begin).sum();
+    if strokes.len() < 3
+        || stroke_width * 2 > last - first
+        || strokes.iter().any(|(begin, end)| end - begin > scaled(40))
+        || (2 * scan_left + first + last).abs_diff(width) > width / 25
+    {
+        return None;
+    }
+
+    let padding = scaled(30);
+    let text_left = (scan_left + first).saturating_sub(padding);
+    let text_right = (scan_left + last + padding).min(width);
+    let text_top = top_y + scaled(8);
+    let text_bottom = line_y - scaled(4);
+    let banner_left = horizontal(2_500);
+    let banner_width = horizontal(7_500) - banner_left;
+    Some(PlaceBannerDetection {
+        line: BoundingBox {
+            left: banner_left,
+            top: line_y,
+            width: banner_width,
+            height: 1,
+        },
+        banner: BoundingBox {
+            left: banner_left,
+            top: top_y,
+            width: banner_width,
+            height: line_y - top_y,
+        },
+        text: BoundingBox {
+            left: text_left,
+            top: text_top,
+            width: text_right - text_left,
+            height: text_bottom - text_top,
+        },
+        text_luma: u8::try_from(text_luma).ok()?,
+    })
 }
 
 fn banner_consensus(hits: &mut [usize], tolerance: usize, minimum: usize) -> Option<usize> {
@@ -1450,43 +1695,44 @@ fn border_score(
     box_width: usize,
     box_height: usize,
 ) -> Option<f32> {
-    let mut supported = [0usize; 4];
+    let mut ratios = [0.0; 4];
     let sample_count = (box_width.min(box_height) / 2).max(8);
     let border_width = (box_width.min(box_height) / 32).max(1).min(2);
-    for sample in 0..sample_count {
-        let x_offset = 2 + sample * (box_width - 4) / sample_count;
-        let y_offset = 2 + sample * (box_height - 4) / sample_count;
-        for offset in 0..border_width {
-            let candidates = [
-                (
-                    (left + x_offset, top + offset),
-                    (left + x_offset, top.saturating_sub(1)),
-                ),
-                (
-                    (left + x_offset, top + box_height - 1 - offset),
-                    (left + x_offset, top + box_height),
-                ),
-                (
-                    (left + offset, top + y_offset),
-                    (left.saturating_sub(1), top + y_offset),
-                ),
-                (
-                    (left + box_width - 1 - offset, top + y_offset),
-                    (left + box_width, top + y_offset),
-                ),
-            ];
-            for (edge, ((x, y), (neighbor_x, neighbor_y))) in candidates.into_iter().enumerate() {
+    let edge_samples = sample_count * border_width;
+    for (edge, ratio) in ratios.iter_mut().enumerate() {
+        let mut supported = 0;
+        for sample in 0..sample_count {
+            let x_offset = 2 + sample * (box_width - 4) / sample_count;
+            let y_offset = 2 + sample * (box_height - 4) / sample_count;
+            for offset in 0..border_width {
+                let ((x, y), (neighbor_x, neighbor_y)) = match edge {
+                    0 => (
+                        (left + x_offset, top + offset),
+                        (left + x_offset, top.saturating_sub(1)),
+                    ),
+                    1 => (
+                        (left + x_offset, top + box_height - 1 - offset),
+                        (left + x_offset, top + box_height),
+                    ),
+                    2 => (
+                        (left + offset, top + y_offset),
+                        (left.saturating_sub(1), top + y_offset),
+                    ),
+                    _ => (
+                        (left + box_width - 1 - offset, top + y_offset),
+                        (left + box_width, top + y_offset),
+                    ),
+                };
                 if is_border_pixel(frame, width, height, x, y, neighbor_x, neighbor_y) {
-                    supported[edge] += 1;
+                    supported += 1;
                 }
             }
+            let remaining = (sample_count - sample - 1) * border_width;
+            if (supported + remaining) as f32 / (edge_samples as f32) < 0.45 {
+                return None;
+            }
         }
-    }
-
-    let edge_samples = sample_count * border_width;
-    let ratios = supported.map(|support| support as f32 / edge_samples as f32);
-    if ratios.iter().any(|ratio| *ratio < 0.45) {
-        return None;
+        *ratio = supported as f32 / edge_samples as f32;
     }
     Some(ratios.iter().sum::<f32>() / ratios.len() as f32)
 }
@@ -1525,6 +1771,59 @@ mod tests {
         find_place1_detection, find_place2_detection, find_region2_detection,
         place_banner_text_image,
     };
+
+    #[test]
+    fn icon_border_requires_each_edge_and_accepts_late_support_at_threshold() {
+        let (width, height) = (80, 80);
+        let (left, top, size) = (10, 10, 40);
+        for first_sample in [0, 11] {
+            let mut frame = vec![0; width * height * 4];
+            for sample in first_sample..first_sample + 9 {
+                let offset = 2 + sample * (size - 4) / 20;
+                for (x, y) in [
+                    (left + offset, top),
+                    (left + offset, top + size - 1),
+                    (left, top + offset),
+                    (left + size - 1, top + offset),
+                ] {
+                    set_pixel(&mut frame, width, x, y, [100, 100, 100, 255]);
+                }
+            }
+            assert_eq!(
+                super::border_score(&frame, width, height, left, top, size, size),
+                Some(0.45)
+            );
+            let offset = 2 + first_sample * (size - 4) / 20;
+            for (x, y) in [
+                (left + offset, top),
+                (left + offset, top + size - 1),
+                (left, top + offset),
+                (left + size - 1, top + offset),
+            ] {
+                let mut missing = frame.clone();
+                set_pixel(&mut missing, width, x, y, [0; 4]);
+                assert!(super::border_score(&missing, width, height, left, top, size, size).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn newitem_accepts_exactly_48_samples_including_late_support() {
+        let (width, height) = (1_000, 1_000);
+        for first_sample in [0, 16] {
+            let mut frame = vec![20; width * height * 4];
+            for y in [571, 632, 810] {
+                for sample in first_sample..first_sample + 48 {
+                    let x = width * 42 / 100 + sample * (width * 16 / 100) / 64;
+                    set_pixel(&mut frame, width, x, y, [100, 100, 100, 255]);
+                }
+            }
+            assert!(super::find_newitem_detection(&frame, width, height).is_some());
+            let x = width * 42 / 100 + first_sample * (width * 16 / 100) / 64;
+            set_pixel(&mut frame, width, x, 571, [20; 4]);
+            assert!(super::find_newitem_detection(&frame, width, height).is_none());
+        }
+    }
 
     #[test]
     fn newitem_requires_three_lines_with_inward_dark_sides() {
@@ -1650,6 +1949,27 @@ mod tests {
 
         let gray_frame = vec![100; width * height * 4];
         assert!(find_grace_detection(&gray_frame, width, height).is_none());
+    }
+
+    #[test]
+    fn place_banner_accepts_late_bottom_edge_consensus() {
+        let (width, height) = (1_920, 1_080);
+        let (mut frame, _, line) = place1_frame(width, height, 140);
+        draw_place1_strokes(&mut frame, width, height, line);
+        let left = width * super::PLACE1_LAYOUT.columns_left / 10_000;
+        let span = width * super::PLACE1_LAYOUT.columns_right / 10_000 - left;
+        for index in 0..11 {
+            let column = left + span * index / (super::BANNER_SAMPLES - 1);
+            for y in line - 20..=line + 20 {
+                for x in column - 1..=column + 1 {
+                    set_pixel(&mut frame, width, x, y, [70, 70, 70, 255]);
+                }
+            }
+            if index == 9 {
+                assert!(find_place1_detection(&frame, width, height).is_some());
+            }
+        }
+        assert!(find_place1_detection(&frame, width, height).is_none());
     }
 
     #[test]

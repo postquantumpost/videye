@@ -1,7 +1,8 @@
 use crate::elden::{
-    find_boss_detection, find_grace_detection, find_lost_grace_discovered_detection,
-    find_newitem_detection, find_place1_detection, find_place2_detection, find_place3_detection,
-    find_region2_detection, place_banner_text_image, GraceSymbolKind, PlaceBannerDetection,
+    find_boss_detection, find_grace_detection, find_invaded_detection,
+    find_lost_grace_discovered_detection, find_newitem_detection, find_place1_detection,
+    find_place2_detection, find_place3_detection, find_region2_detection, find_system_detection,
+    place_banner_text_image, GraceSymbolKind, PlaceBannerDetection,
 };
 use crate::ghost::{
     find_combat1_crop, find_diamond_symbols, find_location1_symbols, find_location_symbols,
@@ -125,6 +126,18 @@ pub(crate) struct NewItem {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct System {
+    timestamp_ns: u128,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Invaded {
+    timestamp_ns: u128,
+    text: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HistoryEntry {
     TextAct(TextAct),
     Location1(Location1),
@@ -140,6 +153,8 @@ pub(crate) enum HistoryEntry {
     Region(Region),
     Boss(Boss),
     NewItem(NewItem),
+    System(System),
+    Invaded(Invaded),
 }
 
 pub(crate) type History = Vec<HistoryEntry>;
@@ -162,11 +177,13 @@ enum EldenDetector {
     LostGraceDiscovered,
     Boss,
     NewItem,
+    System,
+    Invaded,
 }
 
 pub(crate) struct DetectorPriority {
     order: Mutex<[Detector; 5]>,
-    elden_order: Mutex<[EldenDetector; 7]>,
+    elden_order: Mutex<[EldenDetector; 9]>,
 }
 
 impl Default for DetectorPriority {
@@ -187,6 +204,8 @@ impl Default for DetectorPriority {
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::Boss,
                 EldenDetector::NewItem,
+                EldenDetector::System,
+                EldenDetector::Invaded,
             ]),
         }
     }
@@ -204,7 +223,7 @@ impl DetectorPriority {
         }
     }
 
-    fn elden_order(&self) -> [EldenDetector; 7] {
+    fn elden_order(&self) -> [EldenDetector; 9] {
         *self
             .elden_order
             .lock()
@@ -315,6 +334,24 @@ pub(crate) fn process_frame(
                         elapsed_ns,
                     )?,
                     EldenDetector::NewItem => process_newitem_detector(
+                        state,
+                        frame,
+                        output_file,
+                        &mut annotated_frame,
+                        ocr_session,
+                        history,
+                        elapsed_ns,
+                    )?,
+                    EldenDetector::System => process_system_detector(
+                        state,
+                        frame,
+                        output_file,
+                        &mut annotated_frame,
+                        ocr_session,
+                        history,
+                        elapsed_ns,
+                    )?,
+                    EldenDetector::Invaded => process_invaded_detector(
                         state,
                         frame,
                         output_file,
@@ -769,6 +806,117 @@ fn process_newitem_detector(
     Ok(true)
 }
 
+fn process_system_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    const HEADING: &str = "Camera Options";
+    let Some(detection) = find_system_detection(frame, state.frame_width, state.frame_height)
+    else {
+        return Ok(false);
+    };
+    if state.verbose {
+        writeln!(
+            output_file,
+            "System symbol: x={} y={} width={} height={}",
+            detection.symbol.left,
+            detection.symbol.top,
+            detection.symbol.width,
+            detection.symbol.height
+        )?;
+    }
+    let recognized_label = ocr_session.recognize(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &detection.label,
+        state.current_frame,
+    );
+    if recognized_label
+        .as_deref()
+        .map(normalize_place_name)
+        .as_deref()
+        != Some("System")
+    {
+        return Ok(false);
+    }
+    let recognized_heading = ocr_session.recognize(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &detection.heading,
+        state.current_frame,
+    );
+    if recognized_heading
+        .as_deref()
+        .map(normalize_place_name)
+        .as_deref()
+        != Some(HEADING)
+    {
+        return Ok(false);
+    }
+    if let Some(annotated_frame) = annotated_frame {
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.symbol);
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.label);
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.heading);
+    }
+    add_system_with_window(
+        history,
+        elapsed_ns,
+        HEADING.to_string(),
+        DEFAULT_DEDUPE_WINDOW_NS,
+    );
+    Ok(true)
+}
+
+fn process_invaded_detector(
+    state: &ProcessingState,
+    frame: &[u8],
+    output_file: &mut impl Write,
+    annotated_frame: &mut Option<Vec<u8>>,
+    ocr_session: &mut OcrSession<'_>,
+    history: &mut History,
+    elapsed_ns: u128,
+) -> io::Result<bool> {
+    let Some(detection) = find_invaded_detection(frame, state.frame_width, state.frame_height)
+    else {
+        return Ok(false);
+    };
+    let Some(recognized_text) = ocr_session.recognize_message(
+        frame,
+        state.frame_width,
+        state.frame_height,
+        &detection.text,
+        state.current_frame,
+    ) else {
+        return Ok(false);
+    };
+    let text = normalize_place_name(&recognized_text);
+    if text.is_empty() {
+        return Ok(false);
+    }
+    if let Some(annotated_frame) = annotated_frame {
+        for x in detection.line.left..detection.line.left + detection.line.width {
+            set_red_pixel(annotated_frame, state.frame_width, x, detection.line.top);
+        }
+        draw_bounding_box(annotated_frame, state.frame_width, &detection.text);
+    }
+    if state.verbose {
+        writeln!(
+            output_file,
+            "Invaded banner: top={} line={} text x={} width={}",
+            detection.banner.top, detection.line.top, detection.text.left, detection.text.width
+        )?;
+    }
+    add_invaded_with_window(history, elapsed_ns, text, DEFAULT_DEDUPE_WINDOW_NS);
+    Ok(true)
+}
+
 fn normalize_place_name(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -844,42 +992,41 @@ fn process_act_detector(
     }
     let mut matched = false;
     for pair in pairs {
-        let mut actnumber = None;
-        let mut acttitle = None;
-        if let Some(crop) =
-            text_crop_between_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
-        {
-            let text = ocr_session.recognize(
-                frame,
-                state.frame_width,
-                state.frame_height,
-                &crop,
-                state.current_frame,
-            );
-            if let Some(text) = text {
-                actnumber = Some(text);
-            }
-        }
-        if let Some(crop) =
-            title_crop_below_symbols(&pair[0], &pair[1], state.frame_width, state.frame_height)
-        {
-            let title = ocr_session.recognize(
-                frame,
-                state.frame_width,
-                state.frame_height,
-                &crop,
-                state.current_frame,
-            );
-            if let Some(title) = title {
-                acttitle = Some(title);
-            }
-        }
-        if let (Some(actnumber), Some(acttitle)) = (actnumber, acttitle) {
-            add_textact(history, elapsed_ns, actnumber, acttitle);
-            matched = true;
-        }
+        let Some((actnumber, acttitle)) = recognize_act_pair(
+            &pair[0],
+            &pair[1],
+            state.frame_width,
+            state.frame_height,
+            |crop| {
+                ocr_session.recognize(
+                    frame,
+                    state.frame_width,
+                    state.frame_height,
+                    crop,
+                    state.current_frame,
+                )
+            },
+        ) else {
+            continue;
+        };
+        add_textact(history, elapsed_ns, actnumber, acttitle);
+        matched = true;
     }
     Ok(matched)
+}
+
+fn recognize_act_pair(
+    left: &BoundingBox,
+    right: &BoundingBox,
+    width: usize,
+    height: usize,
+    mut recognize: impl FnMut(&BoundingBox) -> Option<String>,
+) -> Option<(String, String)> {
+    let number_crop = text_crop_between_symbols(left, right, width, height)?;
+    let title_crop = title_crop_below_symbols(left, right, width, height)?;
+    let number = recognize(&number_crop)?;
+    let title = recognize(&title_crop)?;
+    Some((number, title))
 }
 
 fn process_location2_detector(
@@ -1096,7 +1243,10 @@ fn add_textact_with_window(
         HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
+        HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::TextAct(TextAct {
@@ -1127,7 +1277,10 @@ fn add_location2_with_window(
         HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
+        HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
         HistoryEntry::Location2(previous) => {
             previous.location2 == location2
                 && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns
@@ -1164,7 +1317,10 @@ fn add_location1_with_window(
         HistoryEntry::Place2(_) | HistoryEntry::Place1(_) | HistoryEntry::Place3(_) => false,
         HistoryEntry::LostGraceDiscovered(_) => false,
         HistoryEntry::Region(_) => false,
-        HistoryEntry::Boss(_) | HistoryEntry::NewItem(_) => false,
+        HistoryEntry::Boss(_)
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Location1(Location1 {
@@ -1201,7 +1357,9 @@ fn add_story_with_window(
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
-        | HistoryEntry::NewItem(_) => false,
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Story(Story { timestamp_ns, text }));
@@ -1235,7 +1393,9 @@ fn add_combat1_with_window(
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
-        | HistoryEntry::NewItem(_) => false,
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Combat1(Combat1 { timestamp_ns, text }));
@@ -1269,7 +1429,9 @@ fn add_grace_with_window(
         | HistoryEntry::LostGraceDiscovered(_)
         | HistoryEntry::Region(_)
         | HistoryEntry::Boss(_)
-        | HistoryEntry::NewItem(_) => false,
+        | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_) => false,
     });
     if !is_duplicate {
         history.push(HistoryEntry::Grace(Grace { timestamp_ns, name }));
@@ -1383,6 +1545,8 @@ fn add_region_with_window(
         | HistoryEntry::Place3(_)
         | HistoryEntry::Boss(_)
         | HistoryEntry::NewItem(_)
+        | HistoryEntry::System(_)
+        | HistoryEntry::Invaded(_)
         | HistoryEntry::LostGraceDiscovered(_) => false,
     });
     if !is_duplicate {
@@ -1443,6 +1607,48 @@ fn add_newitem_with_window(
     });
     if !is_duplicate {
         history.push(HistoryEntry::NewItem(NewItem { timestamp_ns, name }));
+    }
+}
+
+fn add_system_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    name: String,
+    dedupe_window_ns: u128,
+) {
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::System(previous)
+            if previous.name == name
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::System(System { timestamp_ns, name }));
+    }
+}
+
+fn add_invaded_with_window(
+    history: &mut History,
+    timestamp_ns: u128,
+    text: String,
+    dedupe_window_ns: u128,
+) {
+    if [
+        "Summoning cooperator",
+        "has died",
+        "has returned to their world",
+    ]
+    .iter()
+    .any(|substring| text.contains(substring))
+    {
+        return;
+    }
+    let is_duplicate = history.iter().any(|entry| {
+        matches!(entry, HistoryEntry::Invaded(previous)
+            if previous.text == text
+                && timestamp_ns.saturating_sub(previous.timestamp_ns) <= dedupe_window_ns)
+    });
+    if !is_duplicate {
+        history.push(HistoryEntry::Invaded(Invaded { timestamp_ns, text }));
     }
 }
 
@@ -1517,6 +1723,15 @@ pub(crate) fn merge_history(
             HistoryEntry::NewItem(item) => {
                 add_newitem_with_window(history, item.timestamp_ns, item.name, dedupe_window_ns)
             }
+            HistoryEntry::System(system) => {
+                add_system_with_window(history, system.timestamp_ns, system.name, dedupe_window_ns)
+            }
+            HistoryEntry::Invaded(invaded) => add_invaded_with_window(
+                history,
+                invaded.timestamp_ns,
+                invaded.text,
+                dedupe_window_ns,
+            ),
         }
     }
 }
@@ -1537,6 +1752,8 @@ fn history_entry_text(entry: &HistoryEntry) -> (&str, &str) {
         HistoryEntry::Region(entry) => (&entry.name, ""),
         HistoryEntry::Boss(entry) => (&entry.name, ""),
         HistoryEntry::NewItem(entry) => (&entry.name, ""),
+        HistoryEntry::System(entry) => (&entry.name, ""),
+        HistoryEntry::Invaded(entry) => (&entry.text, ""),
     }
 }
 
@@ -1730,6 +1947,12 @@ pub(crate) fn write_history(history: &History, output_file: &mut File) -> io::Re
                 )?;
                 writeln!(output_file, "Newitem: {}", item.name)?;
             }
+            HistoryEntry::System(system) => {
+                write_place_verbose(output_file, "System", system.timestamp_ns, &system.name)?;
+            }
+            HistoryEntry::Invaded(invaded) => {
+                write_place_verbose(output_file, "Invaded", invaded.timestamp_ns, &invaded.text)?;
+            }
         }
     }
     Ok(())
@@ -1763,7 +1986,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {}, {} {frame} {}",
+                    "{timestamp}  {}, {} {frame} {}",
                     textact.actnumber,
                     textact.acttitle,
                     superscript_label("act")
@@ -1778,7 +2001,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     location2.location2,
                     superscript_label("location2")
                 )?;
@@ -1792,7 +2015,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     location1.location1,
                     superscript_label("location1")
                 )?;
@@ -1806,7 +2029,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     story.text,
                     superscript_label("story")
                 )?;
@@ -1820,7 +2043,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     combat1.text,
                     superscript_label("combat1")
                 )?;
@@ -1834,7 +2057,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}       {} {frame} {}",
+                    "{timestamp}              {} {frame} {}",
                     grace.name,
                     superscript_label("grace")
                 )?;
@@ -1848,7 +2071,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}       {} {frame} {}",
+                    "{timestamp}              {} {frame} {}",
                     merchant.name,
                     superscript_label("merchant")
                 )?;
@@ -1862,7 +2085,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}   {} {frame} {}",
+                    "{timestamp}      {} {frame} {}",
                     place.name,
                     superscript_label("place2")
                 )?;
@@ -1876,7 +2099,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     place.name,
                     superscript_label("place1")
                 )?;
@@ -1890,7 +2113,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}     {} {frame} {}",
+                    "{timestamp}          {} {frame} {}",
                     place.name,
                     superscript_label("place3")
                 )?;
@@ -1904,7 +2127,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}       Lost Grace Discovered {frame}"
+                    "{timestamp}              Lost Grace Discovered {frame}"
                 )?;
             }
             HistoryEntry::Region(region) => {
@@ -1916,7 +2139,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}   {} {frame} {}",
+                    "{timestamp}      {} {frame} {}",
                     region.name,
                     superscript_label("region")
                 )?;
@@ -1930,7 +2153,7 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp} {} {frame} {}",
+                    "{timestamp}  {} {frame} {}",
                     boss.name,
                     superscript_label("boss")
                 )?;
@@ -1944,9 +2167,37 @@ pub(crate) fn write_history_single_line(
                 );
                 writeln!(
                     output_file,
-                    "{timestamp}         {} {frame} {}",
+                    "{timestamp}                {} {frame} {}",
                     item.name,
                     superscript_label("newitem")
+                )?;
+            }
+            HistoryEntry::System(system) => {
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    system.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}  {} {frame} {}",
+                    system.name,
+                    superscript_label("system")
+                )?;
+            }
+            HistoryEntry::Invaded(invaded) => {
+                let (timestamp, frame) = format_history_timestamp_with_spacing(
+                    invaded.timestamp_ns,
+                    frame_rate_num,
+                    frame_rate_den,
+                    &mut previous_real_timestamp_ns,
+                );
+                writeln!(
+                    output_file,
+                    "{timestamp}  {} {frame} {}",
+                    invaded.text,
+                    superscript_label("invaded")
                 )?;
             }
         }
@@ -2002,6 +2253,8 @@ fn history_entry_timestamp_ns(entry: &HistoryEntry) -> u128 {
         HistoryEntry::Region(entry) => entry.timestamp_ns,
         HistoryEntry::Boss(entry) => entry.timestamp_ns,
         HistoryEntry::NewItem(entry) => entry.timestamp_ns,
+        HistoryEntry::System(entry) => entry.timestamp_ns,
+        HistoryEntry::Invaded(entry) => entry.timestamp_ns,
     }
 }
 
@@ -2416,6 +2669,8 @@ mod tests {
                 EldenDetector::Place2,
                 EldenDetector::LostGraceDiscovered,
                 EldenDetector::NewItem,
+                EldenDetector::System,
+                EldenDetector::Invaded,
             ]
         );
         assert_eq!(
@@ -2445,7 +2700,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n1:01:01 A12, Opening ⁰ ᵃᶜᵗ\n".as_bytes()
+            "0:00 begin\n1:01:01  A12, Opening ⁰ ᵃᶜᵗ\n".as_bytes()
         );
     }
 
@@ -2482,13 +2737,13 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 First ⁰ ᵇᵒˢˢ\n\
-             0։09 Cosmetic ¹⁵ ᵇᵒˢˢ\n\
-             0:10 Real at ten ⁰ ᵇᵒˢˢ\n\
-             0։19 Cosmetic after ten ¹⁵ ᵇᵒˢˢ\n\
-             0:20 Real at twenty ⁰ ᵇᵒˢˢ\n\
-             1:01:01 Real with hours ⁰ ᵇᵒˢˢ\n\
-             1։01։05 Cosmetic with hours ⁰ ᵇᵒˢˢ\n"
+            "0:00  First ⁰ ᵇᵒˢˢ\n\
+             0։09  Cosmetic ¹⁵ ᵇᵒˢˢ\n\
+             0:10  Real at ten ⁰ ᵇᵒˢˢ\n\
+             0։19  Cosmetic after ten ¹⁵ ᵇᵒˢˢ\n\
+             0:20  Real at twenty ⁰ ᵇᵒˢˢ\n\
+             1:01:01  Real with hours ⁰ ᵇᵒˢˢ\n\
+             1։01։05  Cosmetic with hours ⁰ ᵇᵒˢˢ\n"
                 .as_bytes()
         );
     }
@@ -2506,7 +2761,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, "0:00 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
+        assert_eq!(output, "0:00  A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
     }
 
     #[test]
@@ -2522,7 +2777,7 @@ mod tests {
 
         super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
 
-        assert_eq!(output, "0:00 begin\n0։02 A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
+        assert_eq!(output, "0:00 begin\n0։02  A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
     }
 
     #[test]
@@ -2559,7 +2814,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 Loyal Friend's Grave ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ²\n".as_bytes()
+            "0:00 begin\n0։02  Loyal Friend's Grave ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ²\n".as_bytes()
         );
     }
 
@@ -2573,7 +2828,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 Kin Prefecture ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ¹\n".as_bytes()
+            "0:00 begin\n0։02  Kin Prefecture ⁰ ˡᵒᶜᵃᵗⁱᵒⁿ¹\n".as_bytes()
         );
     }
 
@@ -2587,7 +2842,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 From the darkness ⁰ ˢᵗᵒʳʸ\n".as_bytes()
+            "0:00 begin\n0։02  From the darkness ⁰ ˢᵗᵒʳʸ\n".as_bytes()
         );
     }
 
@@ -2599,7 +2854,7 @@ mod tests {
 
         write_history_single_line(&history, &mut output);
 
-        assert_eq!(output, "0:00 begin\n0։02 RYUZO ⁰ ᶜᵒᵐᵇᵃᵗ¹\n".as_bytes());
+        assert_eq!(output, "0:00 begin\n0։02  RYUZO ⁰ ᶜᵒᵐᵇᵃᵗ¹\n".as_bytes());
     }
 
     #[test]
@@ -2612,7 +2867,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02       Road to the Manor ⁰ ᵍʳᵃᶜᵉ\n".as_bytes()
+            "0:00 begin\n0։02              Road to the Manor ⁰ ᵍʳᵃᶜᵉ\n".as_bytes()
         );
     }
 
@@ -2626,7 +2881,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02       Nomadic Merchant ⁰ ᵐᵉʳᶜʰᵃⁿᵗ\n".as_bytes()
+            "0:00 begin\n0։02              Nomadic Merchant ⁰ ᵐᵉʳᶜʰᵃⁿᵗ\n".as_bytes()
         );
     }
 
@@ -2640,7 +2895,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02   Caria Manor ⁰ ᵖˡᵃᶜᵉ²\n".as_bytes()
+            "0:00 begin\n0։02      Caria Manor ⁰ ᵖˡᵃᶜᵉ²\n".as_bytes()
         );
     }
 
@@ -2656,7 +2911,8 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02   Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n2:02   Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n".as_bytes()
+            "0:00 begin\n0։02      Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n2:02      Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n"
+                .as_bytes()
         );
     }
 
@@ -2672,7 +2928,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02       Lost Grace Discovered ⁰\n2:02       Lost Grace Discovered ⁰\n"
+            "0:00 begin\n0։02              Lost Grace Discovered ⁰\n2:02              Lost Grace Discovered ⁰\n"
                 .as_bytes()
         );
     }
@@ -2701,7 +2957,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n2:02 Royal Knight Loretta ⁰ ᵇᵒˢˢ\n"
+            "0:00 begin\n0։02  Royal Knight Loretta ⁰ ᵇᵒˢˢ\n2:02  Royal Knight Loretta ⁰ ᵇᵒˢˢ\n"
                 .as_bytes()
         );
     }
@@ -2734,7 +2990,8 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։02 Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03     Church of Elleh ⁰ ᵖˡᵃᶜᵉ³\n".as_bytes()
+            "0:00 begin\n0։02  Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03          Church of Elleh ⁰ ᵖˡᵃᶜᵉ³\n"
+                .as_bytes()
         );
     }
 
@@ -2753,7 +3010,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "0:00 begin\n0։01   Limgrave ⁰ ᵖˡᵃᶜᵉ²\n0։02 Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03     Limgrave ⁰ ᵖˡᵃᶜᵉ³\n".as_bytes()
+            "0:00 begin\n0։01      Limgrave ⁰ ᵖˡᵃᶜᵉ²\n0։02  Limgrave ⁰ ᵖˡᵃᶜᵉ¹\n0։03          Limgrave ⁰ ᵖˡᵃᶜᵉ³\n".as_bytes()
         );
     }
 
@@ -2875,6 +3132,8 @@ mod tests {
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
                 HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
+                HistoryEntry::System(_) => panic!("unexpected System entry"),
+                HistoryEntry::Invaded(_) => panic!("unexpected Invaded entry"),
             })
             .collect();
         assert_eq!(
@@ -2917,6 +3176,8 @@ mod tests {
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
                 HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
+                HistoryEntry::System(_) => panic!("unexpected System entry"),
+                HistoryEntry::Invaded(_) => panic!("unexpected Invaded entry"),
             })
             .collect();
         assert_eq!(stories, vec!["From the darkness", "From the darkness"]);
@@ -2960,6 +3221,8 @@ mod tests {
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
                 HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
+                HistoryEntry::System(_) => panic!("unexpected System entry"),
+                HistoryEntry::Invaded(_) => panic!("unexpected Invaded entry"),
             })
             .collect();
         assert_eq!(
@@ -2994,6 +3257,8 @@ mod tests {
                 HistoryEntry::Region(_) => panic!("unexpected Region entry"),
                 HistoryEntry::Boss(_) => panic!("unexpected Boss entry"),
                 HistoryEntry::NewItem(_) => panic!("unexpected NewItem entry"),
+                HistoryEntry::System(_) => panic!("unexpected System entry"),
+                HistoryEntry::Invaded(_) => panic!("unexpected Invaded entry"),
             })
             .collect();
         assert_eq!(locations, vec!["Kin Prefecture", "Kin Prefecture"]);
@@ -3068,7 +3333,7 @@ mod tests {
         write_history_single_line(&history, &mut output);
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            format!("0:00         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n0:11         {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n")
+            format!("0:00                {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n0:11                {name} ⁰ ⁿᵉʷⁱᵗᵉᵐ\n")
         );
     }
 
@@ -3308,6 +3573,226 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local samples/invaded.png, FFmpeg, and Tesseract"]
+    fn invaded_from_invaded_png() {
+        let (frame, width, height) = decode_sample_png("invaded.png");
+        let detection =
+            super::find_invaded_detection(&frame, width, height).expect("invaded banner");
+        assert!(detection.line.top.abs_diff(1_587) <= 3);
+        assert!(detection.text.left < 1_723 && detection.text.left + detection.text.width > 2_114);
+        let expected = HistoryEntry::Invaded(super::Invaded {
+            timestamp_ns: 0,
+            text: "Invaded by Millicent!".to_string(),
+        });
+        assert_single_sample_entry(
+            &frame,
+            width,
+            height,
+            |state, frame, session, history| {
+                super::process_invaded_detector(
+                    state,
+                    frame,
+                    &mut Vec::new(),
+                    &mut None,
+                    session,
+                    history,
+                    0,
+                )
+            },
+            &expected,
+        );
+
+        let cache = crate::ocr_support::OcrCache::default();
+        let mut session = crate::ocr_support::OcrSession::new(true, false, &cache);
+        let mut state = super::ProcessingState {
+            game: super::Game::EldenRing,
+            current_frame: 0,
+            frame_width: width,
+            frame_height: height,
+            frame_size: frame.len(),
+            frame_rate_num: 30,
+            frame_rate_den: 1,
+            check_story_line_thickness: false,
+            verbose: false,
+        };
+        let mut history = Vec::new();
+        super::process_frame(
+            &mut state,
+            &frame,
+            &mut Vec::new(),
+            false,
+            &mut session,
+            &mut crate::ghost::DetectorScratch::default(),
+            &super::DetectorPriority::default(),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(history, vec![expected]);
+
+        for (other, _, _) in [
+            decode_sample_png("system.png"),
+            decode_sample_png("limgrave.png"),
+            decode_sample_png("lizard.png"),
+        ] {
+            assert!(super::find_invaded_detection(&other, width, height).is_none());
+        }
+    }
+
+    #[test]
+    fn invaded_history_filters_unwanted_substrings() {
+        let mut history = Vec::new();
+        let window = super::DEFAULT_DEDUPE_WINDOW_NS;
+        for substring in [
+            "Summoning cooperator",
+            "has died",
+            "has returned to their world",
+        ] {
+            for text in [
+                substring.to_string(),
+                format!("{substring}!"),
+                format!("Player {substring}"),
+                format!("Player {substring}!"),
+            ] {
+                super::add_invaded_with_window(&mut history, 0, text, window);
+                assert!(history.is_empty(), "saved message containing {substring}");
+            }
+        }
+
+        let text = "Invaded by Millicent!".to_string();
+        super::add_invaded_with_window(&mut history, 0, text.clone(), window);
+        assert_eq!(
+            history,
+            vec![HistoryEntry::Invaded(super::Invaded {
+                timestamp_ns: 0,
+                text,
+            })]
+        );
+    }
+
+    #[test]
+    fn invaded_history_dedupes_and_indents_two_spaces() {
+        let mut history = Vec::new();
+        let window = super::DEFAULT_DEDUPE_WINDOW_NS;
+        let text = "Invaded by Millicent!".to_string();
+        super::add_invaded_with_window(&mut history, 0, text.clone(), window);
+        super::add_invaded_with_window(&mut history, window, text.clone(), window);
+        assert_eq!(history.len(), 1);
+        super::add_invaded_with_window(&mut history, window + 1, text.clone(), window);
+        assert_eq!(history.len(), 2);
+
+        let history = super::deduplicate_history(history, 0, 15_000_000_000);
+        assert_eq!(history.len(), 1);
+        let mut output = Vec::new();
+        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let line = output.lines().last().unwrap();
+        let (_, rest) = line.split_once("  ").unwrap();
+        assert!(rest.starts_with("Invaded by Millicent! "), "{line}");
+    }
+
+    #[test]
+    #[ignore = "requires local samples/system.png, FFmpeg, and Tesseract"]
+    fn system_camera_options_from_system_png() {
+        let (frame, width, height) = decode_sample_png("system.png");
+        let detection = super::find_system_detection(&frame, width, height).expect("system box");
+        assert!(detection.symbol.top < height / 10);
+        let expected = HistoryEntry::System(super::System {
+            timestamp_ns: 0,
+            name: "Camera Options".to_string(),
+        });
+        assert_single_sample_entry(
+            &frame,
+            width,
+            height,
+            |state, frame, session, history| {
+                super::process_system_detector(
+                    state,
+                    frame,
+                    &mut Vec::new(),
+                    &mut None,
+                    session,
+                    history,
+                    0,
+                )
+            },
+            &expected,
+        );
+
+        let cache = crate::ocr_support::OcrCache::default();
+        let mut session = crate::ocr_support::OcrSession::new(true, false, &cache);
+        let mut state = super::ProcessingState {
+            game: super::Game::EldenRing,
+            current_frame: 0,
+            frame_width: width,
+            frame_height: height,
+            frame_size: frame.len(),
+            frame_rate_num: 30,
+            frame_rate_den: 1,
+            check_story_line_thickness: false,
+            verbose: false,
+        };
+        let mut history = Vec::new();
+        super::process_frame(
+            &mut state,
+            &frame,
+            &mut Vec::new(),
+            false,
+            &mut session,
+            &mut crate::ghost::DetectorScratch::default(),
+            &super::DetectorPriority::default(),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(history, vec![expected]);
+
+        let mut without_heading = frame.clone();
+        let heading = &detection.heading;
+        for row in heading.top..heading.top + heading.height {
+            for column in heading.left..heading.left + heading.width {
+                let pixel = (row * width + column) * 4;
+                without_heading[pixel..pixel + 4].copy_from_slice(&[20, 20, 20, 255]);
+            }
+        }
+        let mut history = Vec::new();
+        assert!(!super::process_system_detector(
+            &state,
+            &without_heading,
+            &mut Vec::new(),
+            &mut None,
+            &mut session,
+            &mut history,
+            0,
+        )
+        .unwrap());
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn system_history_dedupes_and_indents_two_spaces() {
+        let mut history = Vec::new();
+        let window = super::DEFAULT_DEDUPE_WINDOW_NS;
+        super::add_system_with_window(&mut history, 0, "Camera Options".to_string(), window);
+        super::add_system_with_window(&mut history, window, "Camera Options".to_string(), window);
+        assert_eq!(history.len(), 1);
+        super::add_system_with_window(
+            &mut history,
+            window + 1,
+            "Camera Options".to_string(),
+            window,
+        );
+        assert_eq!(history.len(), 2);
+
+        let history = super::deduplicate_history(history, 0, 15_000_000_000);
+        assert_eq!(history.len(), 1);
+        let mut output = Vec::new();
+        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let line = output.lines().last().unwrap();
+        let (_, rest) = line.split_once("  ").unwrap();
+        assert!(rest.starts_with("Camera Options "), "{line}");
+    }
+
+    #[test]
     #[ignore = "requires local grace and merchant sample images plus FFmpeg"]
     fn classifies_grace_and_merchant_sample_icons() {
         for (filename, expected_kind) in [
@@ -3349,6 +3834,188 @@ mod tests {
                 name: "Church of Elleh".to_string(),
             }),
         );
+    }
+
+    #[test]
+    fn act_pair_stops_before_ocr_when_geometry_fails() {
+        let left = BoundingBox {
+            left: 10,
+            top: 10,
+            width: 10,
+            height: 10,
+        };
+        let right = BoundingBox {
+            left: 15,
+            top: 10,
+            width: 10,
+            height: 10,
+        };
+        assert!(super::recognize_act_pair(&left, &right, 100, 100, |_| {
+            panic!("invalid geometry must not invoke OCR")
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn act_pair_only_reads_title_after_number_succeeds() {
+        let left = BoundingBox {
+            left: 10,
+            top: 10,
+            width: 10,
+            height: 10,
+        };
+        let right = BoundingBox {
+            left: 60,
+            top: 10,
+            width: 10,
+            height: 10,
+        };
+        for (number, title, expected_calls) in [
+            (None, Some("TITLE"), 1),
+            (Some("ACT III"), None, 2),
+            (Some("ACT III"), Some("TITLE"), 2),
+        ] {
+            let mut calls = Vec::new();
+            let result = super::recognize_act_pair(&left, &right, 100, 100, |crop| {
+                calls.push(crop.top);
+                if calls.len() == 1 { number } else { title }.map(str::to_string)
+            });
+            assert_eq!(calls.len(), expected_calls);
+            assert_eq!(
+                result,
+                number.zip(title).map(|(n, t)| (n.to_string(), t.to_string()))
+            );
+            assert_eq!(
+                calls[0],
+                super::text_crop_between_symbols(&left, &right, 100, 100)
+                    .unwrap()
+                    .top
+            );
+            if expected_calls == 2 {
+                assert_eq!(
+                    calls[1],
+                    super::title_crop_below_symbols(&left, &right, 100, 100)
+                        .unwrap()
+                        .top
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "performance measurement requires local samples/gact3.png, FFmpeg, and Tesseract"]
+    fn benchmark_act_detector() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-threads", "1", "-i"])
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/gact3.png"))
+            .args([
+                "-vf",
+                "scale=960:540",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-threads",
+                "1",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (width, height) = (960, 540);
+        assert_eq!(output.stdout.len(), width * height * 4);
+        let mut scratch = crate::ghost::DetectorScratch::default();
+        let state = super::ProcessingState {
+            game: super::Game::GhostofTsushima,
+            current_frame: 1,
+            frame_width: width,
+            frame_height: height,
+            frame_size: output.stdout.len(),
+            frame_rate_num: 30,
+            frame_rate_den: 1,
+            check_story_line_thickness: false,
+            verbose: false,
+        };
+        let symbols = crate::ghost::find_diamond_symbols(&state, &output.stdout, &mut scratch);
+        let pair = symbols
+            .windows(2)
+            .find(|pair| {
+                crate::ghost::horizontal_span_is_centered(
+                    pair[0].left,
+                    pair[1].left + pair[1].width,
+                    width,
+                )
+            })
+            .expect("sample must contain act symbols");
+        let number = crate::ghost::text_crop_between_symbols(&pair[0], &pair[1], width, height).unwrap();
+        let title = crate::ghost::title_crop_below_symbols(&pair[0], &pair[1], width, height).unwrap();
+        let mut no_number = output.stdout.clone();
+        let mut no_title = output.stdout.clone();
+        for (frame, crop) in [(&mut no_number, &number), (&mut no_title, &title)] {
+            for y in crop.top..crop.top + crop.height {
+                for x in crop.left..crop.left + crop.width {
+                    let pixel = (y * width + x) * 4;
+                    frame[pixel..pixel + 4].copy_from_slice(&[255; 4]);
+                }
+            }
+        }
+        for (name, frame) in [
+            ("matching", output.stdout),
+            ("no-number", no_number),
+            ("no-title", no_title),
+        ] {
+            let caches = [
+                crate::ocr_support::OcrCache::default(),
+                crate::ocr_support::OcrCache::default(),
+            ];
+            let mut sessions = caches
+                .each_ref()
+                .map(|cache| crate::ocr_support::OcrSession::new(true, false, cache));
+            let mut run = |fast: bool| {
+                let mut recognize = |crop: &BoundingBox| {
+                    sessions[usize::from(fast)].recognize(black_box(&frame), width, height, crop, 1)
+                };
+                if fast {
+                    super::recognize_act_pair(&pair[0], &pair[1], width, height, recognize)
+                } else {
+                    let number = recognize(&number);
+                    let title = recognize(&title);
+                    number.zip(title)
+                }
+            };
+            let expected = run(false);
+            assert_eq!(expected, run(true), "{name}");
+            let mut times = [Vec::new(), Vec::new()];
+            for round in 0..7 {
+                for fast in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let start = Instant::now();
+                    let mut count = 0;
+                    while start.elapsed() < std::time::Duration::from_millis(10) {
+                        assert_eq!(black_box(run(fast)), expected, "{name}");
+                        count += 1;
+                    }
+                    times[usize::from(fast)].push(start.elapsed().as_nanos() / count);
+                }
+            }
+            times.iter_mut().for_each(|times| times.sort_unstable());
+            println!(
+                "ACT {name}: before={}ns after={}ns result={expected:?}",
+                times[0][3], times[1][3]
+            );
+        }
     }
 
     #[test]

@@ -175,6 +175,24 @@ impl<'cache> OcrSession<'cache> {
         )
     }
 
+    pub(crate) fn recognize_message(
+        &mut self,
+        frame: &[u8],
+        frame_width: usize,
+        frame_height: usize,
+        crop: &BoundingBox,
+        frame_number: u64,
+    ) -> Option<String> {
+        self.recognize_with_validator(
+            frame,
+            frame_width,
+            frame_height,
+            crop,
+            frame_number,
+            is_valid_message,
+        )
+    }
+
     fn recognize_with_validator(
         &mut self,
         frame: &[u8],
@@ -204,14 +222,23 @@ impl<'cache> OcrSession<'cache> {
 }
 
 fn is_valid_item_name(text: &str) -> bool {
+    text.chars().all(is_valid_item_name_char)
+}
+
+fn is_valid_item_name_char(character: char) -> bool {
+    character.is_alphanumeric()
+        || matches!(
+            character,
+            ' ' | ',' | '-' | '\'' | '[' | ']'
+                | '\u{0300}'..='\u{036f}' | '\u{2010}'..='\u{2015}'
+                | '\u{2018}' | '\u{2019}'
+        )
+}
+
+/// Banner messages such as "Invaded by Millicent!" add sentence punctuation to item names.
+fn is_valid_message(text: &str) -> bool {
     text.chars().all(|character| {
-        character.is_alphanumeric()
-            || matches!(
-                character,
-                ' ' | ',' | '-' | '\'' | '[' | ']'
-                    | '\u{0300}'..='\u{036f}' | '\u{2010}'..='\u{2015}'
-                    | '\u{2018}' | '\u{2019}'
-            )
+        matches!(character, '!' | '?' | '.' | ':') || is_valid_item_name_char(character)
     })
 }
 

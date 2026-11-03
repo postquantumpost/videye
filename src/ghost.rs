@@ -281,10 +281,29 @@ pub(crate) fn find_story_crop(
     let min_line_width = (width.saturating_mul(14) / 100).max(8);
     let allowed_gap = (width.saturating_mul(25) / 1_000).max(3);
     let row_tolerance = (height / 200).max(1);
+    let line_y_tolerance = height as f32 * LINE_Y_TOLERANCE_RATIO;
+    let expected_top_line_y = height as f32 * TOP_LINE_Y_RATIO;
+    let expected_bottom_line_y = height as f32 * BOTTOM_LINE_Y_RATIO;
     let mut lines = Vec::new();
     let mut current_line: Option<StoryLine> = None;
+    let mut checked_top_line = false;
 
     for y in search_top..search_bottom.min(height) {
+        // Finish a line crossing the checkpoint before deciding whether its center can match.
+        if !checked_top_line
+            && y as f32 > expected_top_line_y + line_y_tolerance
+            && current_line.is_none()
+        {
+            if !lines.iter().any(|line: &StoryLine| {
+                let center = (line.top + line.bottom) as f32 / 2.0;
+                (center - expected_top_line_y).abs() <= line_y_tolerance
+                    && (!check_line_width
+                        || story_line_thickness_matches_ratio(line.bottom - line.top + 1, height))
+            }) {
+                return None;
+            }
+            checked_top_line = true;
+        }
         let Some((left, right, support)) = strongest_story_run(
             frame,
             width,
@@ -333,9 +352,6 @@ pub(crate) fn find_story_crop(
 
     let min_separation = (height.saturating_mul(25) / 1_000).max(4);
     let max_separation = (height.saturating_mul(12) / 100).max(min_separation + 1);
-    let line_y_tolerance = height as f32 * LINE_Y_TOLERANCE_RATIO;
-    let expected_top_line_y = height as f32 * TOP_LINE_Y_RATIO;
-    let expected_bottom_line_y = height as f32 * BOTTOM_LINE_Y_RATIO;
     let mut best_pair: Option<(StoryLine, StoryLine, usize)> = None;
     for first in 0..lines.len() {
         for second in first + 1..lines.len() {
@@ -1026,22 +1042,18 @@ fn symbol_bounds(
     {
         return None;
     }
-    if !has_three_similar_diamonds(group) {
-        return None;
-    }
-
-    let centers: Vec<(f32, f32)> = group
-        .iter()
-        .map(|part| {
-            (
-                (part.min_x + part.max_x) as f32 / 2.0,
-                (part.min_y + part.max_y) as f32 / 2.0,
-            )
-        })
-        .collect();
+    let centers = group.map(|part| {
+        (
+            (part.min_x + part.max_x) as f32 / 2.0,
+            (part.min_y + part.max_y) as f32 / 2.0,
+        )
+    });
     let center_x = centers.iter().map(|center| center.0).sum::<f32>() / 4.0;
     let group_center_y = centers.iter().map(|center| center.1).sum::<f32>() / 4.0;
     if (group_center_y - center_y as f32).abs() > center_tolerance as f32 {
+        return None;
+    }
+    if !has_three_similar_diamonds(group) {
         return None;
     }
 
@@ -1089,40 +1101,31 @@ fn symbol_bounds(
 }
 
 fn has_three_similar_diamonds(group: &[&Component; 4]) -> bool {
-    let diamonds: Vec<&Component> = group
-        .iter()
-        .copied()
-        .filter(|component| is_roughly_diamond_shaped(component))
-        .collect();
-    if diamonds.len() < 3 {
-        return false;
+    let mut count = 0;
+    let mut min_width = usize::MAX;
+    let mut max_width = 0;
+    let mut min_height = usize::MAX;
+    let mut max_height = 0;
+    for (index, component) in group.iter().enumerate() {
+        if is_roughly_diamond_shaped(component) {
+            count += 1;
+            let width = component.max_x - component.min_x + 1;
+            let height = component.max_y - component.min_y + 1;
+            min_width = min_width.min(width);
+            max_width = max_width.max(width);
+            min_height = min_height.min(height);
+            max_height = max_height.max(height);
+            if max_width as f32 / min_width as f32 > 1.5
+                || max_height as f32 / min_height as f32 > 1.5
+            {
+                return false;
+            }
+        }
+        if count + group.len() - index - 1 < 3 {
+            return false;
+        }
     }
-
-    let min_width = diamonds
-        .iter()
-        .map(|component| component.max_x - component.min_x + 1)
-        .min()
-        .unwrap_or(0);
-    let max_width = diamonds
-        .iter()
-        .map(|component| component.max_x - component.min_x + 1)
-        .max()
-        .unwrap_or(0);
-    let min_height = diamonds
-        .iter()
-        .map(|component| component.max_y - component.min_y + 1)
-        .min()
-        .unwrap_or(0);
-    let max_height = diamonds
-        .iter()
-        .map(|component| component.max_y - component.min_y + 1)
-        .max()
-        .unwrap_or(0);
-
-    min_width > 0
-        && min_height > 0
-        && max_width as f32 / min_width as f32 <= 1.5
-        && max_height as f32 / min_height as f32 <= 1.5
+    true
 }
 
 fn is_roughly_diamond_shaped(component: &Component) -> bool {
@@ -1333,6 +1336,22 @@ mod tests {
         assert_eq!(crop.height, 14);
         assert!(crop.left < 120);
         assert!(crop.left + crop.width > 360);
+    }
+
+    #[test]
+    fn story_top_line_can_cross_the_early_rejection_checkpoint() {
+        let (width, height) = (480, 300);
+        let mut frame = vec![0; width * height * 4];
+        for y in (224..=230).chain(std::iter::once(238)) {
+            for x in 120..360 {
+                let pixel = (y * width + x) * 4;
+                frame[pixel..pixel + 4].copy_from_slice(&[150, 130, 90, 255]);
+            }
+        }
+        let crop = find_story_crop(&frame, width, height, false).unwrap();
+        assert_eq!(crop.top, 231);
+        assert_eq!(crop.height, 7);
+        assert!(find_story_crop(&frame, width, height, true).is_none());
     }
 
     #[test]
