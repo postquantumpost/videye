@@ -516,7 +516,27 @@ fn frame_should_be_kept(frame_index: u64, skip: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_should_be_kept, parse_duration_ns, InputProgress};
+    use super::{file_uri, frame_should_be_kept, parse_duration_ns, InputProgress};
+
+    #[test]
+    fn file_uri_round_trips_native_paths_and_escapes_special_characters() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("videye-uri-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("video #1.webm");
+        std::fs::write(&input, []).unwrap();
+
+        let uri = file_uri(input.to_str().unwrap()).unwrap();
+        let (decoded, hostname) = gstreamer::glib::filename_from_uri(&uri).unwrap();
+        let expected = std::fs::canonicalize(&input).unwrap();
+        let actual = std::fs::canonicalize(decoded).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(actual, expected);
+        assert!(hostname.is_none());
+        assert!(uri.contains("video%20%231.webm"), "{uri}");
+    }
 
     #[test]
     fn reports_each_ten_percent_once_without_zero() {
@@ -658,13 +678,17 @@ fn start_video_encoder(
         format!("location={output}"),
     ]);
 
-    Command::new("gst-launch-1.0")
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| format!("failed to start GStreamer video encoder: {error}"))
+    Command::new(if cfg!(windows) {
+        "gst-launch-1.0.exe"
+    } else {
+        "gst-launch-1.0"
+    })
+    .args(arguments)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .map_err(|error| format!("failed to start GStreamer video encoder: {error}"))
 }
 
 fn parse_duration_ns(value: &str) -> Option<u128> {
@@ -692,10 +716,14 @@ fn parse_duration_ns(value: &str) -> Option<u128> {
 }
 
 fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), String> {
-    let result = Command::new("gst-discoverer-1.0")
-        .arg(input)
-        .output()
-        .map_err(|error| format!("failed to start GStreamer video discovery: {error}"))?;
+    let result = Command::new(if cfg!(windows) {
+        "gst-discoverer-1.0.exe"
+    } else {
+        "gst-discoverer-1.0"
+    })
+    .arg(input)
+    .output()
+    .map_err(|error| format!("failed to start GStreamer video discovery: {error}"))?;
     if !result.status.success() {
         return Err(format!("failed to inspect input video {input}"));
     }
@@ -754,13 +782,7 @@ fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), Strin
 fn file_uri(input: &str) -> Result<String, String> {
     let path = std::fs::canonicalize(input)
         .map_err(|error| format!("failed to open input video {input}: {error}"))?;
-    let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
-            uri.push(byte as char);
-        } else {
-            uri.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    Ok(uri)
+    gst::glib::filename_to_uri(&path, None)
+        .map(|uri| uri.to_string())
+        .map_err(|error| format!("failed to construct input video URI for {input}: {error}"))
 }

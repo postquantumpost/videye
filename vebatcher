@@ -1,26 +1,56 @@
 #!/usr/bin/env bash
 
-# f=/media/jph/slow_bad_3/2026/09/2026090218291302_ghost_80.mp4
+set -euo pipefail
 
-cargo install --path .
+if [ "$#" -eq 0 ]; then
+    echo "Usage: $0 video [...]" >&2
+    exit 2
+fi
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cargo_command=(cargo)
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        ucrt_root=$(cygpath -m "${MSYS2_UCRT64:-C:\\msys64\\ucrt64}")
+        export PATH="$(cygpath -u "$ucrt_root")/bin:$PATH"
+        export CARGO_BUILD_TARGET=x86_64-pc-windows-gnu
+        export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc
+        export LIBCLANG_PATH="$ucrt_root/bin"
+        export TESSERACT_INCLUDE_PATHS="$ucrt_root/include"
+        export TESSERACT_LINK_PATHS="$ucrt_root/lib"
+        export TESSERACT_LINK_LIBS=tesseract
+        export LEPTONICA_INCLUDE_PATH="$ucrt_root/include"
+        export LEPTONICA_LINK_PATHS="$ucrt_root/lib"
+        export LEPTONICA_LINK_LIBS=leptonica
+        export TESSDATA_PREFIX="$ucrt_root/share/tessdata"
+        cargo_command+=(+stable-x86_64-pc-windows-gnu)
+        ;;
+esac
+
+"${cargo_command[@]}" build --release --locked --manifest-path "$script_dir/Cargo.toml"
 
 n=$(nproc)
-echo running on $n cpus
+echo "running on $n cpus"
 
-for f in $*
+for f in "$@"
 do
     echo ''
     f2long=${f%.*}.txt
     f2short=${f2long##*/}
     f2="${f2short}"
-    echo process $f to $f2
+    echo "process $f to $f2"
     if [ -f "$f2" ];then
-        echo $f2 already exists
+        echo "$f2 already exists"
     else
-        #echo ''
-        #echo cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
-        #cargo run -- --in $f --out $f2 --parallel-count 16 --skip 4
-        echo videye --game er --in $f --out $f2 --parallel-count $n --skip 3
-        time videye --game er --in $f --out $f2 --parallel-count $n --skip 3
+        echo "videye --game er --in $f --out $f2 --parallel-count $n --skip 3"
+        if "${cargo_command[@]}" run --release --locked --manifest-path "$script_dir/Cargo.toml" -- \
+            --game er --in "$f" --out "$f2" --parallel-count "$n" --skip 3; then
+            :
+        else
+            status=$?
+            echo "Processing failed for $f; removing incomplete output $f2" >&2
+            rm -f -- "$f2"
+            exit "$status"
+        fi
     fi
 done

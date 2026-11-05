@@ -7,6 +7,27 @@ Run it with input and text output paths. `--game gt` selects Ghost of Tsushima (
 cargo run -- --in inputfile --out outputfile [--game gt|er] [--vout annotated.mp4] [--parallel-count 16] [--skip n] [--dedupe seconds] [--use-tesseract-library true|false]
 ```
 
+For an Elden Ring batch, run `bash ./vebatcher "video one.mp4" "video two.mp4"`.
+The launcher builds the local release binary, uses all available CPUs with
+`--skip 3`, and writes each video's basename with a `.txt` extension in the
+current directory. Existing text files are skipped. Build or processing failures
+stop the batch, and incomplete text output is removed so a retry is not skipped.
+No global `cargo install` is required.
+
+On Windows, run the launcher from Git Bash or MSYS2 with Rustup installed. It
+uses the GNU Rust toolchain and MSYS2 UCRT64 libraries without changing the
+global Rust default. Install the toolchain with
+`rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal` and
+install these packages from an MSYS2 terminal:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-libav mingw-w64-ucrt-x86_64-tesseract-ocr mingw-w64-ucrt-x86_64-tesseract-data-eng
+```
+
+The default UCRT64 directory is `C:\msys64\ucrt64`; set `MSYS2_UCRT64` if it is
+installed elsewhere. The launcher configures the compiler, native libraries,
+DLL search path, and English OCR data for its child processes only.
+
 Frame processing uses sixteen worker threads by default; set `--parallel-count` to change the number of concurrent workers. `--skip n` processes one frame then skips the next `n` frames; it defaults to `0`. Legacy detection deduplication is disabled by default by the internal `dedup_mode_1` boolean in `src/processing.rs`. Setting it to `true` restores the legacy deduplication behavior before the new post-processing pass. `--dedupe seconds` sets the legacy mode's deduplication window and defaults to `120` seconds; it has no effect while that mode is disabled. Frame numbers and timestamps remain based on the original input, and skipped frames are included in the reported FPS. The video output supports MP4, Matroska (`.mkv`), and WebM (`.webm`) files.
 
 The new post-processing deduplication pass is enabled by the internal `dedup_mode_2 = true` setting in `src/processing.rs`, with `dedup_seconds = 0.25` and `dedup_repeat_seconds = 15`. After video processing and before either history format is written, it groups consecutive detections with identical types and exact text (both act number and title for acts). A group whose last-to-first timestamp span is at least `dedup_seconds` retains only its first entry; shorter groups, including single detections, are discarded. Before retaining a qualifying entry, it compares that entry only with the newest entry already retained. If their types and text match and their timestamps are less than `dedup_repeat_seconds` apart, the candidate is discarded; an entry exactly 15 seconds later is retained. Discarded entries do not reset this repeat window. Groups are not joined across intervening entries with different types or text, and skipped frames do not change source timestamps. Setting `dedup_mode_2` to `false` bypasses this pass. The legacy `dedup_mode_1` remains disabled.
