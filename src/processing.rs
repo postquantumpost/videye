@@ -538,6 +538,24 @@ mod tests {
         assert!(uri.contains("video%20%231.webm"), "{uri}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_accepts_extended_unc_and_drive_paths() {
+        for (input, expected) in [
+            (
+                r"\\?\UNC\server\share\video #1.mp4",
+                "file:////server/share/video%20%231.mp4",
+            ),
+            (r"\\?\C:\video #1.mp4", "file:///C:/video%20%231.mp4"),
+        ] {
+            let path = super::file_uri_path(std::path::Path::new(input));
+            let uri = gstreamer::glib::filename_to_uri(path, None).unwrap();
+            assert_eq!(uri.as_str(), expected);
+            let (decoded, _) = gstreamer::glib::filename_from_uri(&uri).unwrap();
+            assert_eq!(decoded, super::file_uri_path(std::path::Path::new(input)));
+        }
+    }
+
     #[test]
     fn reports_each_ten_percent_once_without_zero() {
         let mut progress = InputProgress::new(100);
@@ -782,7 +800,26 @@ fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), Strin
 fn file_uri(input: &str) -> Result<String, String> {
     let path = std::fs::canonicalize(input)
         .map_err(|error| format!("failed to open input video {input}: {error}"))?;
+    #[cfg(windows)]
+    let path = file_uri_path(&path);
     gst::glib::filename_to_uri(&path, None)
         .map(|uri| uri.to_string())
         .map_err(|error| format!("failed to construct input video URI for {input}: {error}"))
+}
+
+#[cfg(windows)]
+fn file_uri_path(path: &Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf, Prefix};
+
+    let mut components = path.components();
+    let mut normalized = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimUNC(server, share) => PathBuf::from(r"\\").join(server).join(share),
+            Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+            _ => return path.to_path_buf(),
+        },
+        _ => return path.to_path_buf(),
+    };
+    normalized.extend(components.filter(|part| !matches!(part, Component::RootDir)));
+    normalized
 }

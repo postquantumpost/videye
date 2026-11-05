@@ -27,6 +27,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-clang mingw-w
 The default UCRT64 directory is `C:\msys64\ucrt64`; set `MSYS2_UCRT64` if it is
 installed elsewhere. The launcher configures the compiler, native libraries,
 DLL search path, and English OCR data for its child processes only.
+Video inputs may use local drive paths, mapped network drives, or UNC paths.
 
 Frame processing uses sixteen worker threads by default; set `--parallel-count` to change the number of concurrent workers. `--skip n` processes one frame then skips the next `n` frames; it defaults to `0`. Legacy detection deduplication is disabled by default by the internal `dedup_mode_1` boolean in `src/processing.rs`. Setting it to `true` restores the legacy deduplication behavior before the new post-processing pass. `--dedupe seconds` sets the legacy mode's deduplication window and defaults to `120` seconds; it has no effect while that mode is disabled. Frame numbers and timestamps remain based on the original input, and skipped frames are included in the reported FPS. The video output supports MP4, Matroska (`.mkv`), and WebM (`.webm`) files.
 
