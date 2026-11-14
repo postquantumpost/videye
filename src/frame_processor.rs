@@ -815,7 +815,6 @@ fn process_system_detector(
     history: &mut History,
     elapsed_ns: u128,
 ) -> io::Result<bool> {
-    const HEADING: &str = "Camera Options";
     let Some(detection) = find_system_detection(frame, state.frame_width, state.frame_height)
     else {
         return Ok(false);
@@ -852,14 +851,12 @@ fn process_system_detector(
         &detection.heading,
         state.current_frame,
     );
-    if recognized_heading
+    let Some(heading) = recognized_heading
         .as_deref()
-        .map(normalize_place_name)
-        .as_deref()
-        != Some(HEADING)
-    {
+        .and_then(recognized_system_heading)
+    else {
         return Ok(false);
-    }
+    };
     if let Some(annotated_frame) = annotated_frame {
         draw_bounding_box(annotated_frame, state.frame_width, &detection.symbol);
         draw_bounding_box(annotated_frame, state.frame_width, &detection.label);
@@ -868,10 +865,29 @@ fn process_system_detector(
     add_system_with_window(
         history,
         elapsed_ns,
-        HEADING.to_string(),
+        heading.to_string(),
         DEFAULT_DEDUPE_WINDOW_NS,
     );
     Ok(true)
+}
+
+fn recognized_system_heading(text: &str) -> Option<&'static str> {
+    const HEADINGS: &[&str] = &[
+        "Camera Options",
+        "Game Options",
+        "Display",
+        "Sound",
+        "Network",
+        "Controller Settings",
+        "Keyboard/Mouse Settings",
+        "Graphics",
+        "Quit Game",
+    ];
+    let normalized = normalize_place_name(text);
+    HEADINGS
+        .iter()
+        .copied()
+        .find(|heading| *heading == normalized.as_str())
 }
 
 fn process_invaded_detector(
@@ -3025,6 +3041,24 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_supported_system_menu_headings() {
+        for heading in [
+            "Camera Options",
+            "Game Options",
+            "Display",
+            "Sound",
+            "Network",
+            "Controller Settings",
+            "Keyboard/Mouse Settings",
+            "Graphics",
+            "Quit Game",
+        ] {
+            assert_eq!(super::recognized_system_heading(heading), Some(heading));
+        }
+        assert_eq!(super::recognized_system_heading("Equipment"), None);
+    }
+
+    #[test]
     fn rejects_fragmentary_region_ocr_but_keeps_region_names() {
         assert_eq!(super::normalize_region_name("ee"), "");
         assert_eq!(super::normalize_region_name("Foe"), "");
@@ -3883,7 +3917,9 @@ mod tests {
             assert_eq!(calls.len(), expected_calls);
             assert_eq!(
                 result,
-                number.zip(title).map(|(n, t)| (n.to_string(), t.to_string()))
+                number
+                    .zip(title)
+                    .map(|(n, t)| (n.to_string(), t.to_string()))
             );
             assert_eq!(
                 calls[0],
@@ -3956,8 +3992,10 @@ mod tests {
                 )
             })
             .expect("sample must contain act symbols");
-        let number = crate::ghost::text_crop_between_symbols(&pair[0], &pair[1], width, height).unwrap();
-        let title = crate::ghost::title_crop_below_symbols(&pair[0], &pair[1], width, height).unwrap();
+        let number =
+            crate::ghost::text_crop_between_symbols(&pair[0], &pair[1], width, height).unwrap();
+        let title =
+            crate::ghost::title_crop_below_symbols(&pair[0], &pair[1], width, height).unwrap();
         let mut no_number = output.stdout.clone();
         let mut no_title = output.stdout.clone();
         for (frame, crop) in [(&mut no_number, &number), (&mut no_title, &title)] {

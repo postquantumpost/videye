@@ -23,5 +23,6 @@ cargo install --path .
 #f=../samples/elleh.mp4
 #f=./samples/elden.mp4
 #f=./samples/system.mp4
-f=./samples/invaded.mp4
-./vebatcher $f
+#f=./samples/invaded.mp4
+#./vebatcher $f
+./vebatcher ./samples/rannirune1.mp4 ./samples/rannirune1d.mp4

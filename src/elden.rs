@@ -153,7 +153,7 @@ pub(crate) fn find_grace_detection(
 }
 
 /// Finds the system menu icon box at the top left and the "System" label beside it. The
-/// `heading` region covers the menu tab title shown below the box, e.g. "Camera Options".
+/// `heading` region covers the menu tab title shown below the box.
 pub(crate) fn find_system_detection(
     frame: &[u8],
     width: usize,
@@ -171,7 +171,7 @@ pub(crate) fn find_system_detection(
     let heading = BoundingBox {
         left: width.saturating_mul(185) / 1_000,
         top: heading_top,
-        width: width.saturating_mul(150) / 1_000,
+        width: width.saturating_mul(260) / 1_000,
         height: (height.saturating_mul(42) / 1_000).max(5),
     };
     (heading.top + heading.height <= height && heading.left + heading.width <= width).then_some(
@@ -1802,7 +1802,9 @@ mod tests {
             ] {
                 let mut missing = frame.clone();
                 set_pixel(&mut missing, width, x, y, [0; 4]);
-                assert!(super::border_score(&missing, width, height, left, top, size, size).is_none());
+                assert!(
+                    super::border_score(&missing, width, height, left, top, size, size).is_none()
+                );
             }
         }
     }

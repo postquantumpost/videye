@@ -1,6 +1,8 @@
 # videye
 A video processing program to extract annotations.
 
+Much of this code was developed with AI tools including code generation.
+
 Run it with input and text output paths. `--game gt` selects Ghost of Tsushima (the default), while `--game er` selects Elden Ring. Add `--vout` to also write an annotated video. The in-process Tesseract library backend is used by default; pass `--use-tesseract-library false` to use the subprocess backend:
 
 ```sh
@@ -59,7 +61,7 @@ Elden Ring mode uses the same icon-box detector for sites of grace and merchants
 
 Elden Ring mode emits `newitem: <item name>` after detecting the three gray separators in the lower-center item popup and confirming `NEW` with OCR. Item names have a separate UTF-8 character filter supporting alphanumerics, accented characters, commas, dashes, apostrophes, and square brackets. Existing match character filters are unchanged. With the local sample available, run `cargo test newitem -- --include-ignored` to also check `samples/lizard.png` using both OCR backends without processing the sample video.
 
-Elden Ring mode has a `system` detector for the System menu, such as `samples/system.png`. It looks for the same kind of icon box as grace and merchants, but near the top-left corner of the frame, and confirms the adjacent `System` label with OCR. It then OCRs the menu tab heading below and records a `system` entry only when the heading is `Camera Options`; other tabs are ignored. Entries are deduplicated like the other types and are written two spaces after the timestamp. With the local sample available, run `cargo test system -- --include-ignored` to also check `samples/system.png` using both OCR backends.
+Elden Ring mode has a `system` detector for the System menu, such as `samples/system.png`. It looks for the same kind of icon box as grace and merchants, but near the top-left corner of the frame, and confirms the adjacent `System` label with OCR. It then OCRs the menu tab heading below and records each supported tab as a separate `system` entry: `Camera Options`, `Game Options`, `Display`, `Sound`, `Network`, `Controller Settings`, `Keyboard/Mouse Settings`, `Graphics`, or `Quit Game`. Other tabs are ignored. Entries are deduplicated like the other types and are written two spaces after the timestamp. With the local sample available, run `cargo test system -- --include-ignored` to also check `samples/system.png` using both OCR backends.
 
 Elden Ring mode has an `invaded` detector for the multiplayer message banner low in the frame, such as `samples/invaded.png`. It looks for a translucent dark band across the middle half of the frame, with a grey line along its bottom and brighter scenery above its soft top edge. It then finds the bright, centred text, which may be about twice as wide as the sample, and OCRs it. The OCR also accepts sentence punctuation such as `!`. The recognized text, for example `Invaded by Millicent!`, is stored as an `invaded` entry. Messages containing `Summoning cooperator`, `has died`, or `has returned to their world` are not saved (case-sensitive substring matching). Entries are deduplicated like the other types and are written two spaces after the timestamp. With the local sample available, run `cargo test invaded -- --include-ignored` to also check `samples/invaded.png` using both OCR backends.
 
