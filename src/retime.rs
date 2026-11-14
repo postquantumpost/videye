@@ -1,4 +1,4 @@
-use crate::frame_processor::history_timestamp_is_real;
+use crate::frame_processor::{history_timestamp_is_real, timestamp_is_near_video_end};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -108,6 +108,25 @@ fn create_temporary_directory(parent: &Path) -> io::Result<PathBuf> {
 }
 
 fn retime_text(input: &str) -> Result<String, String> {
+    let video_end_timestamp_ns = input.split_inclusive('\n').enumerate().try_fold(
+        None,
+        |end_timestamp_ns, (index, line)| {
+            let timestamp_end = line.find(char::is_whitespace).unwrap_or(line.len());
+            let timestamp = &line[..timestamp_end];
+            if line[timestamp_end..].trim() != "end"
+                || !timestamp.starts_with(|c: char| c.is_ascii_digit())
+                || !timestamp.contains([':', '\u{0589}'])
+            {
+                return Ok(end_timestamp_ns);
+            }
+            if end_timestamp_ns.is_some() {
+                return Err("multiple end timestamps".to_string());
+            }
+            let seconds = parse_timestamp(timestamp)
+                .ok_or_else(|| format!("invalid timestamp on line {}: {timestamp}", index + 1))?;
+            Ok(Some(u128::from(seconds) * 1_000_000_000))
+        },
+    )?;
     let mut output = String::with_capacity(input.len());
     let mut previous_real_timestamp_ns = None;
     for (index, line) in input.split_inclusive('\n').enumerate() {
@@ -121,10 +140,12 @@ fn retime_text(input: &str) -> Result<String, String> {
         }
         let seconds = parse_timestamp(timestamp)
             .ok_or_else(|| format!("invalid timestamp on line {}: {timestamp}", index + 1))?;
-        let is_real = history_timestamp_is_real(
-            u128::from(seconds) * 1_000_000_000,
-            &mut previous_real_timestamp_ns,
-        );
+        let timestamp_ns = u128::from(seconds) * 1_000_000_000;
+        let is_end_timestamp = line[timestamp_end..].trim() == "end";
+        let is_real = !is_end_timestamp
+            && !video_end_timestamp_ns
+                .is_some_and(|end| timestamp_is_near_video_end(timestamp_ns, end))
+            && history_timestamp_is_real(timestamp_ns, &mut previous_real_timestamp_ns);
         let separator = if is_real { ":" } else { "\u{0589}" };
         output.push_str(&timestamp.replace([':', '\u{0589}'], separator));
         output.push_str(&line[timestamp_end..]);
@@ -182,6 +203,15 @@ mod tests {
             retime_text("0:20 A\n0:20 B\n0:05 C\n0:30 D\n").unwrap(),
             "0:20 A\n0\u{0589}20 B\n0\u{0589}05 C\n0:30 D\n"
         );
+    }
+
+    #[test]
+    fn uses_end_timestamp_to_make_the_final_eleven_seconds_cosmetic() {
+        let input = "0:00 begin\n1:18 A\n1:19 B\n1:20 C\n1:30 end\n";
+        let expected = "0:00 begin\n1:18 A\n1\u{0589}19 B\n1\u{0589}20 C\n1\u{0589}30 end\n";
+
+        assert_eq!(retime_text(input).unwrap(), expected);
+        assert_eq!(retime_text(expected).unwrap(), expected);
     }
 
     #[test]

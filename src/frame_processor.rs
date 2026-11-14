@@ -1980,15 +1980,16 @@ pub(crate) fn write_history_single_line(
     output_file: &mut impl Write,
     frame_rate_num: u32,
     frame_rate_den: u32,
+    video_end_timestamp_ns: Option<u128>,
 ) -> io::Result<()> {
     let has_zero_timestamp_entry = history
         .iter()
         .any(|entry| history_entry_timestamp_ns(entry) < 1_000_000_000);
     let mut previous_real_timestamp_ns = if has_zero_timestamp_entry {
-        None
+        TimestampSpacing::new(video_end_timestamp_ns, None)
     } else {
         writeln!(output_file, "0:00 begin")?;
-        Some(0)
+        TimestampSpacing::new(video_end_timestamp_ns, Some(0))
     };
 
     for entry in history {
@@ -2218,6 +2219,11 @@ pub(crate) fn write_history_single_line(
             }
         }
     }
+    if let Some(video_end_timestamp_ns) = video_end_timestamp_ns {
+        let (timestamp, _) =
+            format_history_timestamp(video_end_timestamp_ns, frame_rate_num, frame_rate_den);
+        writeln!(output_file, "{} end", timestamp.replace(':', "։"))?;
+    }
     Ok(())
 }
 
@@ -2225,9 +2231,19 @@ fn format_history_timestamp_with_spacing(
     timestamp_ns: u128,
     frame_rate_num: u32,
     frame_rate_den: u32,
-    previous_real_timestamp_ns: &mut Option<u128>,
+    previous_real_timestamp_ns: &mut TimestampSpacing,
 ) -> (String, String) {
-    let is_real = history_timestamp_is_real(timestamp_ns, previous_real_timestamp_ns);
+    let is_real = if previous_real_timestamp_ns
+        .video_end_timestamp_ns
+        .is_some_and(|end| timestamp_is_near_video_end(timestamp_ns, end))
+    {
+        false
+    } else {
+        history_timestamp_is_real(
+            timestamp_ns,
+            &mut previous_real_timestamp_ns.previous_real_timestamp_ns,
+        )
+    };
 
     let (mut timestamp, frame) =
         format_history_timestamp(timestamp_ns, frame_rate_num, frame_rate_den);
@@ -2235,6 +2251,29 @@ fn format_history_timestamp_with_spacing(
         timestamp = timestamp.replace(':', "։");
     }
     (timestamp, frame)
+}
+
+struct TimestampSpacing {
+    video_end_timestamp_ns: Option<u128>,
+    previous_real_timestamp_ns: Option<u128>,
+}
+
+impl TimestampSpacing {
+    fn new(video_end_timestamp_ns: Option<u128>, previous_real_timestamp_ns: Option<u128>) -> Self {
+        Self {
+            video_end_timestamp_ns,
+            previous_real_timestamp_ns,
+        }
+    }
+}
+
+pub(crate) fn timestamp_is_near_video_end(
+    timestamp_ns: u128,
+    video_end_timestamp_ns: u128,
+) -> bool {
+    const COSMETIC_END_WINDOW_NS: u128 = 11_000_000_000;
+
+    timestamp_ns.saturating_add(COSMETIC_END_WINDOW_NS) >= video_end_timestamp_ns
 }
 
 pub(crate) fn history_timestamp_is_real(
@@ -2638,7 +2677,7 @@ mod tests {
     }
 
     fn write_history_single_line(history: &super::History, output: &mut Vec<u8>) {
-        super::write_history_single_line(history, output, 30, 1).unwrap();
+        super::write_history_single_line(history, output, 30, 1, None).unwrap();
     }
 
     #[test]
@@ -2791,7 +2830,7 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+        super::write_history_single_line(&history, &mut output, 30, 1, None).unwrap();
 
         assert_eq!(output, "0:00 begin\n0։02  A12, Opening ¹⁵ ᵃᶜᵗ\n".as_bytes());
     }
@@ -2928,6 +2967,24 @@ mod tests {
         assert_eq!(
             output,
             "0:00 begin\n0։02      Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n2:02      Three Sisters ⁰ ʳᵉᵍⁱᵒⁿ\n"
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn makes_timestamps_within_eleven_seconds_of_video_end_cosmetic() {
+        let mut history = Vec::new();
+        add_region(&mut history, 78_000_000_000, "Before end".to_string());
+        add_region(&mut history, 79_000_000_000, "Near end".to_string());
+        let mut output = Vec::new();
+
+        super::write_history_single_line(&history, &mut output, 30, 1, Some(90_000_000_000))
+            .unwrap();
+
+        assert_eq!(
+            output,
+            "0:00 begin\n1:18      Before end ⁰ ʳᵉᵍⁱᵒⁿ\n\
+             1։19      Near end ⁰ ʳᵉᵍⁱᵒⁿ\n1։30 end\n"
                 .as_bytes()
         );
     }
@@ -3717,7 +3774,7 @@ mod tests {
         let history = super::deduplicate_history(history, 0, 15_000_000_000);
         assert_eq!(history.len(), 1);
         let mut output = Vec::new();
-        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+        super::write_history_single_line(&history, &mut output, 30, 1, None).unwrap();
         let output = String::from_utf8(output).unwrap();
         let line = output.lines().last().unwrap();
         let (_, rest) = line.split_once("  ").unwrap();
@@ -3819,7 +3876,7 @@ mod tests {
         let history = super::deduplicate_history(history, 0, 15_000_000_000);
         assert_eq!(history.len(), 1);
         let mut output = Vec::new();
-        super::write_history_single_line(&history, &mut output, 30, 1).unwrap();
+        super::write_history_single_line(&history, &mut output, 30, 1, None).unwrap();
         let output = String::from_utf8(output).unwrap();
         let line = output.lines().last().unwrap();
         let (_, rest) = line.split_once("  ").unwrap();

@@ -270,7 +270,8 @@ pub fn process_files(
         .map_err(|error| format!("failed to write output file {output}: {error}"))?;
     println!("{message}");
 
-    let (width, height, frame_rate_num, frame_rate_den, total_frames) = video_dimensions(input)?;
+    let (width, height, frame_rate_num, frame_rate_den, total_frames, video_duration_ns) =
+        video_dimensions(input)?;
     let mut progress = InputProgress::new(total_frames);
     let frame_size = width
         .checked_mul(height)
@@ -489,9 +490,14 @@ pub fn process_files(
         write_history(&history, &mut output_file)
             .map_err(|error| format!("failed to write text history to {output}: {error}"))?;
     }
-    write_history_single_line(&history, &mut output_file, frame_rate_num, frame_rate_den).map_err(
-        |error| format!("failed to write single-line text history to {output}: {error}"),
-    )?;
+    write_history_single_line(
+        &history,
+        &mut output_file,
+        frame_rate_num,
+        frame_rate_den,
+        Some(video_duration_ns),
+    )
+    .map_err(|error| format!("failed to write single-line text history to {output}: {error}"))?;
 
     let elapsed_seconds = started_at.elapsed().as_secs_f64();
     let frames_per_second = if elapsed_seconds > 0.0 {
@@ -733,7 +739,7 @@ fn parse_duration_ns(value: &str) -> Option<u128> {
         .checked_add(fraction.parse::<u128>().ok()? * 10u128.pow(9 - fraction.len() as u32))
 }
 
-fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), String> {
+fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128, u128), String> {
     let result = Command::new(if cfg!(windows) {
         "gst-discoverer-1.0.exe"
     } else {
@@ -789,7 +795,7 @@ fn video_dimensions(input: &str) -> Result<(usize, usize, u32, u32, u128), Strin
                 .checked_mul(u128::from(rate_num))
                 .ok_or_else(|| format!("video duration is too large for {input}"))?
                 .div_ceil(1_000_000_000 * u128::from(rate_den));
-            Ok((width, height, rate_num, rate_den, total_frames))
+            Ok((width, height, rate_num, rate_den, total_frames, duration_ns))
         }
         _ => Err(format!(
             "could not determine video dimensions, frame rate, or duration for {input}"
