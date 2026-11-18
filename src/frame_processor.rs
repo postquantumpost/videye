@@ -1225,7 +1225,7 @@ fn frame_timestamp_ns(state: &ProcessingState) -> u128 {
         / u128::from(state.frame_rate_num)
 }
 
-const DEFAULT_DEDUPE_WINDOW_NS: u128 = 120_000_000_000;
+const DEFAULT_DEDUPE_WINDOW_NS: u128 = 300_000_000_000;
 
 fn add_textact(history: &mut History, timestamp_ns: u128, actnumber: String, acttitle: String) {
     add_textact_with_window(
